@@ -55,8 +55,16 @@
     boss: "ボスの指令（相手のベンチとバトル場を入替）",
     switch: "ポケモンいれかえ（自分のバトル場とベンチを入替）",
     heal30: "きずぐすり（自分のポケモンのHPを30回復）",
-    tool_hp30: "どうぐ：つけたポケモンの最大HP+30",
-    tool_dmg20: "どうぐ：つけたポケモンのワザのダメージ+20"
+   tool_hp30: "どうぐ：つけたポケモンの最大HP+30",
+    tool_dmg20: "どうぐ：つけたポケモンのワザのダメージ+20",
+    stadium_search_basic: "スタジアム：番に1回、たね1枚ベンチへ（ボウルタウン等）",
+    stadium_draw1: "スタジアム：番に1回、山札を1枚引く",
+    stadium_heal30: "スタジアム：番に1回、バトル場HPを30回復",
+    stadium_energy_hand: "スタジアム：番に1回、山札からエネ1枚手札へ",
+    stadium_switch: "スタジアム：番に1回、自分のバトル場とベンチ入替",
+    stadium_hp30: "スタジアム（常時）：お互いの最大HP+30",
+    stadium_dmg20: "スタジアム（常時）：お互いのワザダメージ+20",
+    stadium_retreat_minus1: "スタジアム（常時）：お互いのにげるエネ-1（ビーチコート等）"
   };
 
   /* ================= 60枚サンプルAIデッキ（3種） ================= */
@@ -413,6 +421,13 @@
 
   function guessTrainerEffect(name, category) {
     const n = norm(name);
+    if (category === "stadium") {
+      if (n.includes("ボウルタウン") || n.includes("テーブルシティ")) return "stadium_search_basic";
+      if (n.includes("ビーチコート")) return "stadium_retreat_minus1";
+      if (n.includes("エキサイトスタジアム") || n.includes("重力玉")) return "stadium_hp30";
+      if (n.includes("ポケストップ") || n.includes("バトルコロシアム")) return "stadium_draw1";
+      return "none";
+    }
     if (category === "tool") {
       if (n.includes("おまもり") || n.includes("マント")) return "tool_hp30";
       if (n.includes("ベルト") || n.includes("ハチマキ") || n.includes("バンド")) return "tool_dmg20";
@@ -480,7 +495,7 @@
     else if (battleMetaMap[keyName]) spec = { ...battleMetaMap[keyName] };
     else spec = getDefaultSpec(binderCard.name, binderCard.type);
 
-    if (["goods", "support", "tool"].includes(spec.category) && (!spec.trainerEffect || spec.trainerEffect === "none")) {
+    if (["goods", "support", "tool", "stadium"].includes(spec.category) && (!spec.trainerEffect || spec.trainerEffect === "none")) {
       const guessed = guessTrainerEffect(binderCard.name, spec.category);
       if (guessed !== "none") spec.trainerEffect = guessed;
     }
@@ -650,13 +665,13 @@
     return list;
   }
 
-  function getMaxHp(slot) {
+ function getMaxHp(slot) {
     if (!slot || !slot.card) return 0;
     const base = Number(slot.card.hp) || 80;
     const bonus = (slot.tool && slot.tool.trainerEffect === "tool_hp30") ? 30 : 0;
-    return base + bonus;
+    const stBonus = (G && G.stadium && G.stadium.trainerEffect === "stadium_hp30") ? 30 : 0;
+    return base + bonus + stBonus;
   }
-
   function canEvolveOnto(evoCard, targetSlot, currentTurn) {
     if (!evoCard || evoCard.category !== "pokemon" || !targetSlot) return false;
     if (currentTurn <= 2) return false;
@@ -752,6 +767,7 @@
       energyAttachedThisTurn: false,
       supporterUsedThisTurn: false,
       retreatedThisTurn: false,
+      stadiumUsedThisTurn: false,
       player: { name: "あなた", deckName: pBuilt.deckName, deck: shuffle([...pBuilt.cards]), hand: [], active: null, bench: [], prizes: [], discard: [] },
       ai: { name: "AI", deckName: aBuilt.deckName, deck: shuffle([...aBuilt.cards]), hand: [], active: null, bench: [], prizes: [], discard: [] }
     };
@@ -903,6 +919,7 @@
     G.energyAttachedThisTurn = false;
     G.supporterUsedThisTurn = false;
     G.retreatedThisTurn = false;
+    G.stadiumUsedThisTurn = false;
     G.selectedHandUid = null;
     closeCardZoom();
     closeTrashModal();
@@ -1233,6 +1250,7 @@ const swMode = getAttackSwitchOpponentMode(atk);
       side.hand = side.hand.filter((c) => c.uid !== card.uid);
       if (G.stadium) side.discard.push(G.stadium);
       G.stadium = card;
+      G.stadiumUsedThisTurn = false;
       addLog(`🏟️ ${side.name}がスタジアム「${card.name}」を出した（中央ボタンで拡大確認できます）。`, "trainer");
       if (onDone) onDone();
       return { ok: true, summary: `スタジアム「${card.name}」を場に出した` };
@@ -2101,7 +2119,109 @@ const swMode = getAttackSwitchOpponentMode(atk);
     renderCardZoom();
     document.getElementById("btlHandZoomOverlay").classList.add("is-open");
   }
+function useStadiumEffect(sideKey) {
+    if (!G || !G.stadium || G.phase !== "play" || G.activeSide !== sideKey || aiBusy) return;
+    if (G.stadiumUsedThisTurn) {
+      if (sideKey === "player") toast("スタジアムの効果は1ターンに1回までです");
+      return;
+    }
 
+    const st = G.stadium;
+    const eff = st.trainerEffect || "none";
+    const side = G[sideKey];
+
+    if (eff === "stadium_search_basic") {
+      if (side.bench.length >= 5) return toast("ベンチがいっぱいです（最大5匹）");
+      const cands = side.deck.filter((c) => c.category === "pokemon" && (c.stage || "たね") === "たね");
+      if (cands.length === 0) return toast("山札にたねポケモンがいません");
+      const uMap = new Map();
+      cands.forEach((c) => { if (!uMap.has(c.name)) uMap.set(c.name, c); });
+      openSelectModal(`🏟️ ${st.name}`, "ベンチに出すたねポケモンを1枚選んでください", [...uMap.values()].map((c) => ({
+        label: `${c.name}（HP ${c.hp || 70}）`,
+        photoUrl: c.photoUrl,
+        card: c,
+        onPick: () => {
+          const real = side.deck.find((x) => x.name === c.name && x.category === "pokemon" && (x.stage || "たね") === "たね");
+          if (real) {
+            side.deck = side.deck.filter((x) => x.uid !== real.uid);
+            side.bench.push(createPokemonSlot(real, G.turn));
+            shuffle(side.deck);
+            G.stadiumUsedThisTurn = true;
+            addLog(`🏟️ スタジアム「${st.name}」の効果で${real.name}をベンチに出した！`, "trainer");
+            renderBattleArena();
+          }
+        }
+      })), true);
+      return;
+    }
+
+    if (eff === "stadium_draw1") {
+      if (side.deck.length === 0) return toast("山札が0枚です");
+      const [drawn] = drawCards(side, 1);
+      G.stadiumUsedThisTurn = true;
+      addLog(`🏟️ スタジアム「${st.name}」の効果で1枚ドロー（${drawn ? drawn.name : ""}）！`, "trainer");
+      renderBattleArena();
+      return;
+    }
+
+    if (eff === "stadium_heal30") {
+      if (!side.active || side.active.damage <= 0) return toast("バトル場にダメージを受けているポケモンがいません");
+      side.active.damage = Math.max(0, side.active.damage - 30);
+      G.stadiumUsedThisTurn = true;
+      addLog(`🏟️ スタジアム「${st.name}」の効果で${side.active.card.name}のHPを30回復！`, "trainer");
+      renderBattleArena();
+      return;
+    }
+
+    if (eff === "stadium_energy_hand") {
+      const enes = side.deck.filter((c) => c.category === "energy");
+      if (enes.length === 0) return toast("山札にエネルギーがありません");
+      const uMap = new Map();
+      enes.forEach((c) => { if (!uMap.has(c.name)) uMap.set(c.name, c); });
+      openSelectModal(`🏟️ ${st.name}`, "手札に加えるエネルギーを1枚選んでください", [...uMap.values()].map((c) => ({
+        label: c.name,
+        photoUrl: c.photoUrl,
+        card: c,
+        onPick: () => {
+          const real = side.deck.find((x) => x.name === c.name && x.category === "energy");
+          if (real) {
+            side.deck = side.deck.filter((x) => x.uid !== real.uid);
+            side.hand.push(real);
+            shuffle(side.deck);
+            G.stadiumUsedThisTurn = true;
+            addLog(`🏟️ スタジアム「${st.name}」の効果で${real.name}を手札に加えた！`, "trainer");
+            renderBattleArena();
+          }
+        }
+      })), true);
+      return;
+    }
+
+    if (eff === "stadium_switch") {
+      if (!side.active || side.bench.length === 0) return toast("入れ替えるベンチポケモンがいません");
+      openSelectModal(`🏟️ ${st.name}`, "バトル場と入れ替えるベンチポケモンを選んでください", side.bench.map((sl, i) => ({
+        label: `${sl.card.name}（HP ${getMaxHp(sl) - sl.damage}/${getMaxHp(sl)}・エネ${sl.energies.length}）`,
+        photoUrl: sl.card.photoUrl,
+        card: sl.card,
+        onPick: () => {
+          const nextAct = side.bench.splice(i, 1)[0];
+          clearSlotStatus(side.active);
+          side.bench.push(side.active);
+          side.active = nextAct;
+          G.stadiumUsedThisTurn = true;
+          addLog(`🏟️ スタジアム「${st.name}」の効果で${nextAct.card.name}と入れ替えた！`, "trainer");
+          renderBattleArena();
+        }
+      })), true);
+      return;
+    }
+
+    // 未対応の特殊スタジアムは使用ログを残して手動補助メニューを開く
+    G.stadiumUsedThisTurn = true;
+    addLog(`🏟️ スタジアム「${st.name}」の効果を使用（手動メニューで反映）`, "trainer");
+    renderBattleArena();
+    openManualAssistMenu();
+  }
   function openStadiumZoom() {
     if (!G || !G.stadium) return;
     zoomState = {
@@ -2282,6 +2402,30 @@ function openSelectZoom(items, idx) {
         if (selOv) selOv.classList.remove("is-open");
         if (selEntry && selEntry.onPick) selEntry.onPick();
       };
+   } else if (zoomState.mode === "stadium") {
+      const stEff = card.trainerEffect || "none";
+      const isPassive = ["stadium_hp30", "stadium_dmg20", "stadium_retreat_minus1"].includes(stEff);
+      const canUseNow = G.phase === "play" && G.activeSide === "player" && !aiBusy && !G.stadiumUsedThisTurn;
+      if (isPassive) {
+        actionsEl.innerHTML = `
+          <button id="btlHzCloseBtn" class="btl-act-btn" type="button">閉じる</button>
+          <button class="btl-act-btn" style="flex:1.8;" type="button" disabled>✨ 場にある間ずっと自動適用中</button>
+        `;
+        document.getElementById("btlHzCloseBtn").onclick = closeCardZoom;
+      } else {
+        const btnLabel = G.stadiumUsedThisTurn
+          ? "この番は使用済み"
+          : (canUseNow ? "🏟️ この効果を使う" : "自分の番に使用できます");
+        actionsEl.innerHTML = `
+          <button id="btlHzCloseBtn" class="btl-act-btn" type="button">閉じる</button>
+          <button id="btlHzUseStadiumBtn" class="btl-act-btn is-primary" style="flex:1.8;" type="button" ${canUseNow ? "" : "disabled"}>${btnLabel}</button>
+        `;
+        document.getElementById("btlHzCloseBtn").onclick = closeCardZoom;
+        document.getElementById("btlHzUseStadiumBtn").onclick = () => {
+          closeCardZoom();
+          useStadiumEffect("player");
+        };
+      }
     } else {
       actionsEl.innerHTML = `<button id="btlHzCloseBtn" class="btl-act-btn" type="button" style="flex:1;">閉じる</button>`;
       document.getElementById("btlHzCloseBtn").onclick = closeCardZoom;
@@ -2431,7 +2575,8 @@ function openSelectZoom(items, idx) {
     }
 
     const activeSlot = G.player.active;
-    const cost = Number(activeSlot.card.retreat) || 0;
+    const stRetreat = (G.stadium && G.stadium.trainerEffect === "stadium_retreat_minus1") ? 1 : 0;
+    const cost = Math.max(0, (Number(activeSlot.card.retreat) || 0) - stRetreat);
     if (activeSlot.energies.length < cost) return toast(`にげるエネルギーが足りません（必要 ${cost}個）`);
 
     const executeRetreat = (benchIndex, chosenEnergyUids) => {
