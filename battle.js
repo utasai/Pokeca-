@@ -975,7 +975,92 @@
     addLog(`🏆 決着！${winnerSide === "player" ? "あなたの勝利！" : "AIの勝利…"}（${reason}）`, "win");
     renderBattleArena();
   }
+/* ワザの相手入れ替え効果を判定（自動テキスト判定＋手動設定の両対応） */
+  function getAttackSwitchOpponentMode(atk) {
+    if (!atk) return null;
+    if (atk.effectType === "switch_opp_atk") return "attacker";
+    if (atk.effectType === "switch_opp_def") return "defender";
+    const txt = norm(atk.effect || "");
+    if (!txt) return null;
+    const mentionsOpp = txt.includes("相手");
+    const mentionsBench = txt.includes("ベンチ");
+    const mentionsSwap = txt.includes("入れ替") || txt.includes("いれかえ");
+    if (mentionsOpp && mentionsBench && mentionsSwap) {
+      // 「相手のベンチポケモンを1匹選び〜」など攻撃側が指定するタイプ
+      if (/相手のベンチ.*?(選|えら)/.test(txt)) return "attacker";
+      // 「相手のバトルポケモンをベンチポケモンと入れ替える」など相手が選ぶタイプ
+      return "defender";
+    }
+    return null;
+  }
 
+  /* ワザ効果で相手のバトル場とベンチを入れ替える */
+  async function applyAttackSwitchOpponent(attackerKey, defKey, atk, mode, sid) {
+    const defSide = G[defKey];
+    if (!defSide || !defSide.active || defSide.bench.length === 0) return;
+
+    const chooserKey = mode === "attacker" ? attackerKey : defKey;
+
+    const doSwap = (benchIdx) => {
+      const prevName = defSide.active.card.name;
+      const nextAct = defSide.bench.splice(benchIdx, 1)[0];
+      clearSlotStatus(defSide.active); // ベンチに戻ると特殊状態は回復
+      defSide.bench.push(defSide.active);
+      defSide.active = nextAct;
+      addLog(`🌪️ ワザ「${atk.name}」の効果！${defSide.name}の${prevName}とベンチの${nextAct.card.name}を入れ替えた！`, "trainer");
+      renderBattleArena();
+      flashBoardTarget(defKey === "ai" ? "#btlAiActive .btl-pkm-card" : "#btlPlActive .btl-pkm-card");
+      return nextAct;
+    };
+
+    if (chooserKey === "ai") {
+      let targetIdx = 0;
+      if (attackerKey === "ai") {
+        // AIが攻撃側として選ぶ場合：残りHPが一番少ないベンチを呼び出す
+        let minRem = 9999;
+        defSide.bench.forEach((sl, i) => {
+          const rem = getMaxHp(sl) - sl.damage;
+          if (rem < minRem) { minRem = rem; targetIdx = i; }
+        });
+      } else {
+        // AIが防御側として選ぶ場合：エネやHPに余裕があるポケモンを出す
+        let bestScore = -1;
+        defSide.bench.forEach((sl, i) => {
+          const sc = sl.energies.length * 100 + (getMaxHp(sl) - sl.damage);
+          if (sc > bestScore) { bestScore = sc; targetIdx = i; }
+        });
+      }
+      const nextAct = doSwap(targetIdx);
+      await showActionCutin({
+        badge: "🌪️ ワザ効果：入れ替え",
+        title: `${nextAct.card.name} がバトル場へ！`,
+        detail: `${defSide.name}のバトルポケモンとベンチを入れ替えた`,
+        card: nextAct.card,
+        accent: "trainer",
+        duration: 1200
+      }, sid);
+      return;
+    }
+
+    // プレイヤーがベンチから選ぶ場合（選択が終わるまで待機）
+    await new Promise((resolve) => {
+      const title = mode === "attacker"
+        ? `🌪️ ${atk.name}：呼び出す相手を選択`
+        : `🌪️ ${atk.name}：バトル場に出すポケモンを選択`;
+      const sub = mode === "attacker"
+        ? "バトル場に呼び出す相手のベンチポケモンを選んでください"
+        : "ワザの効果でバトル場と入れ替える自分のベンチポケモンを選んでください";
+
+      openSelectModal(title, sub, defSide.bench.map((sl, i) => ({
+        label: `${sl.card.name}（HP ${getMaxHp(sl) - sl.damage}/${getMaxHp(sl)}・エネ${sl.energies.length}）`,
+        photoUrl: sl.card.photoUrl,
+        onPick: () => {
+          doSwap(i);
+          resolve();
+        }
+      })), false);
+    });
+  }
   async function performAttack(attackerKey, attackIdx) {
     if (!G || G.phase !== "play") return;
     const sid = matchSessionId;
@@ -2776,18 +2861,28 @@
           <input type="text" class="form-control sp-from" value="${esc(s.evolvesFrom || "")}" placeholder="進化元(例:ラルトス)" style="padding:4px 6px;font-size:11px;" />
           <input type="number" class="form-control sp-ret" value="${s.retreat ?? 1}" min="0" max="5" placeholder="にげる" style="padding:4px 6px;font-size:11px;" />
         </div>
-        <div style="font-size:10px;font-weight:800;color:#64748b;margin-bottom:2px;">ワザ1（ワザ名 / エネ数 / ダメージ）</div>
+       <div style="font-size:10px;font-weight:800;color:#64748b;margin-bottom:2px;">ワザ1（ワザ名 / エネ数 / ダメージ）</div>
         <div style="display:grid;grid-template-columns:2fr 0.8fr 1fr;gap:4px;margin-bottom:4px;">
           <input type="text" class="form-control sp-a0-name" value="${esc(a0.name)}" placeholder="ワザ1名" style="padding:4px 6px;font-size:11px;" />
           <input type="number" class="form-control sp-a0-cost" value="${a0.cost}" min="0" max="6" placeholder="エネ" style="padding:4px;font-size:11px;" />
           <input type="number" class="form-control sp-a0-dmg" value="${a0.damage}" min="0" step="10" placeholder="ダメ" style="padding:4px;font-size:11px;" />
         </div>
+        <select class="form-control sp-a0-efftype" style="padding:4px 6px;font-size:11px;margin-bottom:5px;">
+          <option value="none" ${(a0.effectType || "none") === "none" ? "selected" : ""}>ワザ1効果：なし（テキスト自動判定）</option>
+          <option value="switch_opp_def" ${a0.effectType === "switch_opp_def" ? "selected" : ""}>ワザ1効果：相手バトル場とベンチ入替（相手が選ぶ）</option>
+          <option value="switch_opp_atk" ${a0.effectType === "switch_opp_atk" ? "selected" : ""}>ワザ1効果：相手バトル場とベンチ入替（自分が選ぶ）</option>
+        </select>
         <div style="font-size:10px;font-weight:800;color:#64748b;margin-bottom:2px;">ワザ2（任意・空欄ならワザ1のみ）</div>
-        <div style="display:grid;grid-template-columns:2fr 0.8fr 1fr;gap:4px;">
+        <div style="display:grid;grid-template-columns:2fr 0.8fr 1fr;gap:4px;margin-bottom:4px;">
           <input type="text" class="form-control sp-a1-name" value="${esc(a1.name || "")}" placeholder="ワザ2名（任意）" style="padding:4px 6px;font-size:11px;" />
           <input type="number" class="form-control sp-a1-cost" value="${a1.cost ?? 2}" min="0" max="6" placeholder="エネ" style="padding:4px;font-size:11px;" />
           <input type="number" class="form-control sp-a1-dmg" value="${a1.damage ?? 0}" min="0" step="10" placeholder="ダメ" style="padding:4px;font-size:11px;" />
         </div>
+        <select class="form-control sp-a1-efftype" style="padding:4px 6px;font-size:11px;">
+          <option value="none" ${(a1.effectType || "none") === "none" ? "selected" : ""}>ワザ2効果：なし（テキスト自動判定）</option>
+          <option value="switch_opp_def" ${a1.effectType === "switch_opp_def" ? "selected" : ""}>ワザ2効果：相手バトル場とベンチ入替（相手が選ぶ）</option>
+          <option value="switch_opp_atk" ${a1.effectType === "switch_opp_atk" ? "selected" : ""}>ワザ2効果：相手バトル場とベンチ入替（自分が選ぶ）</option>
+        </select>
       `;
     }
     if (cat === "energy") {
@@ -2857,18 +2952,20 @@
           if (row.querySelector(".sp-from")) nextSpec.evolvesFrom = row.querySelector(".sp-from").value.trim();
           if (row.querySelector(".sp-ret")) nextSpec.retreat = Math.max(0, Number(row.querySelector(".sp-ret").value) || 0);
 
-          const a0Name = row.querySelector(".sp-a0-name") ? row.querySelector(".sp-a0-name").value.trim() : "たいあたり";
+         const a0Name = row.querySelector(".sp-a0-name") ? row.querySelector(".sp-a0-name").value.trim() : "たいあたり";
           const a0Cost = row.querySelector(".sp-a0-cost") ? Math.max(0, Number(row.querySelector(".sp-a0-cost").value) || 0) : 1;
           const a0Dmg = row.querySelector(".sp-a0-dmg") ? Math.max(0, Number(row.querySelector(".sp-a0-dmg").value) || 0) : 40;
+          const a0EffType = row.querySelector(".sp-a0-efftype") ? row.querySelector(".sp-a0-efftype").value : "none";
           const prevA0Eff = (it.spec.attacks && it.spec.attacks[0] && it.spec.attacks[0].effect) || "";
-          const attacks = [{ name: a0Name || "ワザ1", cost: a0Cost, damage: a0Dmg, effect: prevA0Eff }];
+          const attacks = [{ name: a0Name || "ワザ1", cost: a0Cost, damage: a0Dmg, effect: prevA0Eff, effectType: a0EffType }];
 
           const a1Name = row.querySelector(".sp-a1-name") ? row.querySelector(".sp-a1-name").value.trim() : "";
           if (a1Name) {
             const a1Cost = row.querySelector(".sp-a1-cost") ? Math.max(0, Number(row.querySelector(".sp-a1-cost").value) || 0) : 2;
             const a1Dmg = row.querySelector(".sp-a1-dmg") ? Math.max(0, Number(row.querySelector(".sp-a1-dmg").value) || 0) : 0;
+            const a1EffType = row.querySelector(".sp-a1-efftype") ? row.querySelector(".sp-a1-efftype").value : "none";
             const prevA1Eff = (it.spec.attacks && it.spec.attacks[1] && it.spec.attacks[1].effect) || "";
-            attacks.push({ name: a1Name, cost: a1Cost, damage: a1Dmg, effect: prevA1Eff });
+            attacks.push({ name: a1Name, cost: a1Cost, damage: a1Dmg, effect: prevA1Eff, effectType: a1EffType });
           }
           nextSpec.attacks = attacks;
         } else if (cat === "energy") {
