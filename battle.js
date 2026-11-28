@@ -2811,20 +2811,6 @@ function openSelectZoom(items, idx) {
     openSelectModal(`⚔️ ${sl.card.name}のワザ`, `ついているエネルギー：${sl.energies.length}個`, opts, true);
   }
 
-    const sl = G.player.active;
-    const atks = sl.card.attacks || [];
-    if (atks.length === 0) return toast("このポケモンにワザが登録されていません");
-
-    openSelectModal(`⚔️ ${sl.card.name}のワザ`, `ついているエネルギー：${sl.energies.length}個`, atks.map((a, idx) => {
-      const ok = sl.energies.length >= a.cost;
-      return {
-        label: `${ok ? "✅" : "🔒"} ${a.name}（必要エネ${a.cost} ／ ${a.damage}ダメージ）${a.effect ? ` — ${a.effect}` : ""}`,
-        disabled: !ok,
-        onPick: () => performAttack("player", idx)
-      };
-    }), true);
-  }
-
   function openRetreatPicker() {
     if (!G || G.phase !== "play" || G.activeSide !== "player" || aiBusy) return;
     if (G.retreatedThisTurn) return toast("にげるは1ターンに1回までです");
