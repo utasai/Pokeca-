@@ -2113,7 +2113,17 @@ const swMode = getAttackSwitchOpponentMode(atk);
     renderCardZoom();
     document.getElementById("btlHandZoomOverlay").classList.add("is-open");
   }
-
+function openSelectZoom(items, idx) {
+    if (!items || items.length === 0) return;
+    zoomState = {
+      mode: "select",
+      idx: Math.max(0, Math.min(items.length - 1, idx)),
+      owner: "select",
+      list: items
+    };
+    renderCardZoom();
+    document.getElementById("btlHandZoomOverlay").classList.add("is-open");
+  }
   function closeCardZoom() {
     const el = document.getElementById("btlHandZoomOverlay");
     if (el) el.classList.remove("is-open");
@@ -2149,11 +2159,17 @@ const swMode = getAttackSwitchOpponentMode(atk);
       card = zoomState.list[zoomState.idx];
       const ownerLabel = zoomState.owner === "player" ? "あなた" : "AI";
       document.getElementById("btlHzPos").textContent = `🗑️ ${ownerLabel}のトラッシュ（${zoomState.idx + 1} / ${totalLen}）`;
-    } else if (zoomState.mode === "stadium") {
+   } else if (zoomState.mode === "stadium") {
       totalLen = 1;
       card = G.stadium;
       if (!card) { closeCardZoom(); return; }
       document.getElementById("btlHzPos").textContent = "🏟️ 場に出ているスタジアム";
+    } else if (zoomState.mode === "select") {
+      totalLen = zoomState.list.length;
+      if (totalLen === 0) { closeCardZoom(); return; }
+      zoomState.idx = Math.max(0, Math.min(totalLen - 1, zoomState.idx));
+      card = zoomState.list[zoomState.idx].card;
+      document.getElementById("btlHzPos").textContent = `🔍 カード確認（${zoomState.idx + 1} / ${totalLen}・左右スワイプ可）`;
     } else {
       totalLen = zoomState.list.length;
       if (totalLen === 0) { closeCardZoom(); return; }
@@ -2253,6 +2269,19 @@ const swMode = getAttackSwitchOpponentMode(atk);
       document.getElementById("btlHzCloseBtn").onclick = closeCardZoom;
       document.getElementById("btlHzRetreatBtn").onclick = () => { closeCardZoom(); openRetreatPicker(); };
       document.getElementById("btlHzAttackBtn").onclick = () => { closeCardZoom(); openAttackPicker(); };
+    } else if (zoomState.mode === "select") {
+      const selEntry = zoomState.list[zoomState.idx];
+      actionsEl.innerHTML = `
+        <button id="btlHzCloseBtn" class="btl-act-btn" type="button">一覧に戻る</button>
+        <button id="btlHzPickBtn" class="btl-act-btn is-primary" style="flex:1.8;" type="button" ${selEntry && !selEntry.disabled ? "" : "disabled"}>✅ このカードを選ぶ</button>
+      `;
+      document.getElementById("btlHzCloseBtn").onclick = closeCardZoom;
+      document.getElementById("btlHzPickBtn").onclick = () => {
+        closeCardZoom();
+        const selOv = document.getElementById("btlSelectModal");
+        if (selOv) selOv.classList.remove("is-open");
+        if (selEntry && selEntry.onPick) selEntry.onPick();
+      };
     } else {
       actionsEl.innerHTML = `<button id="btlHzCloseBtn" class="btl-act-btn" type="button" style="flex:1;">閉じる</button>`;
       document.getElementById("btlHzCloseBtn").onclick = closeCardZoom;
@@ -2731,18 +2760,75 @@ const swMode = getAttackSwitchOpponentMode(atk);
     }
   }
 
-  /* ================= 汎用選択モーダル ================= */
+  /* ================= 汎用選択モーダル（カード拡大対応） ================= */
+  function findCardForSelectOption(opt) {
+    if (!opt) return null;
+    if (opt.card) return opt.card;
+    if (!G) return null;
+    const pool = [
+      ...G.player.deck, ...G.player.hand, ...G.player.discard,
+      ...(G.player.active ? [G.player.active.card] : []),
+      ...G.player.bench.map((s) => s.card),
+      ...(G.ai.active ? [G.ai.active.card] : []),
+      ...G.ai.bench.map((s) => s.card)
+    ].filter(Boolean);
+    if (opt.photoUrl) {
+      const byPhoto = pool.find((c) => c.photoUrl === opt.photoUrl);
+      if (byPhoto) return byPhoto;
+    }
+    const lbl = String(opt.label || "");
+    const byName = pool.find((c) =>
+      c.name && (
+        lbl === c.name ||
+        lbl.startsWith(`${c.name}（`) ||
+        lbl.startsWith(`${c.name} —`) ||
+        lbl === `👾 ${c.name}` ||
+        lbl === `🔋 ${c.name}`
+      )
+    );
+    if (byName) return byName;
+    if (opt.photoUrl) return { name: lbl, photoUrl: opt.photoUrl, category: "goods", effectText: lbl };
+    return null;
+  }
+
   function openSelectModal(title, sub, options, allowCancel = true, onCancel = null) {
     const ov = document.getElementById("btlSelectModal");
     document.getElementById("btlSelectTitle").textContent = title;
     document.getElementById("btlSelectSub").textContent = sub || "";
     const list = document.getElementById("btlSelectList");
-    list.innerHTML = options.map((opt, idx) => `
-      <button type="button" class="btl-opt-row" data-idx="${idx}" ${opt.disabled ? "disabled" : ""}>
-        ${opt.photoUrl ? `<img src="${opt.photoUrl}" class="btl-opt-thumb" />` : ""}
-        <span style="flex:1;text-align:left;">${esc(opt.label)}</span>
-      </button>
-    `).join("");
+
+    const zoomList = [];
+    const zoomIndexByOptIdx = new Map();
+    options.forEach((opt, idx) => {
+      const resolvedCard = findCardForSelectOption(opt);
+      if (resolvedCard) {
+        zoomIndexByOptIdx.set(idx, zoomList.length);
+        zoomList.push({
+          card: resolvedCard,
+          disabled: Boolean(opt.disabled),
+          onPick: opt.onPick
+        });
+      }
+    });
+
+    list.innerHTML = options.map((opt, idx) => {
+      const hasZoom = zoomIndexByOptIdx.has(idx);
+      const zIdx = hasZoom ? zoomIndexByOptIdx.get(idx) : -1;
+      return `
+        <div class="btl-opt-wrap">
+          ${opt.photoUrl
+            ? (hasZoom
+                ? `<button type="button" class="btl-opt-thumb-btn" data-zidx="${zIdx}" title="タップで拡大"><img src="${opt.photoUrl}" class="btl-opt-thumb" alt="" /></button>`
+                : `<img src="${opt.photoUrl}" class="btl-opt-thumb" alt="" />`)
+            : ""}
+          <button type="button" class="btl-opt-row" data-idx="${idx}" ${opt.disabled ? "disabled" : ""}>
+            <span style="flex:1;text-align:left;">${esc(opt.label)}</span>
+          </button>
+          ${hasZoom ? `<button type="button" class="btl-opt-zoom-btn" data-zidx="${zIdx}" title="拡大して確認">🔍</button>` : ""}
+        </div>
+      `;
+    }).join("");
+
     list.querySelectorAll(".btl-opt-row").forEach((btn) => {
       btn.addEventListener("click", () => {
         const opt = options[Number(btn.dataset.idx)];
@@ -2750,6 +2836,14 @@ const swMode = getAttackSwitchOpponentMode(atk);
         if (opt && opt.onPick) opt.onPick();
       });
     });
+
+    list.querySelectorAll("[data-zidx]").forEach((btn) => {
+      btn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        openSelectZoom(zoomList, Number(btn.dataset.zidx));
+      });
+    });
+
     const closeBtn = document.getElementById("btlSelectCancelBtn");
     closeBtn.style.display = allowCancel ? "inline-flex" : "none";
     closeBtn.onclick = () => { ov.classList.remove("is-open"); if (onCancel) onCancel(); };
@@ -3245,8 +3339,8 @@ const swMode = getAttackSwitchOpponentMode(atk);
       .btl-act-btn.is-attack { background: linear-gradient(135deg, #f97316 0%, #ef4444 100%); border-color: #fb923c; }
       .btl-act-btn.is-end { background: #3b82f6; border-color: #60a5fa; }
 
-      .btl-hand-zoom-overlay {
-        position: fixed; inset: 0; bottom: var(--host-bottom-offset, 0px); z-index: 238;
+    .btl-hand-zoom-overlay {
+        position: fixed; inset: 0; bottom: var(--host-bottom-offset, 0px); z-index: 244;
         background: rgba(9, 15, 30, 0.88); backdrop-filter: blur(7px);
         display: none; flex-direction: column; align-items: center; justify-content: center;
         padding: calc(14px + env(safe-area-inset-top)) 14px calc(16px + env(safe-area-inset-bottom));
@@ -3351,13 +3445,25 @@ const swMode = getAttackSwitchOpponentMode(atk);
         100% { opacity: 1; transform: scale(1) translateY(0); }
       }
 
+     .btl-opt-wrap {
+        display: flex; align-items: center; gap: 6px; width: 100%;
+      }
       .btl-opt-row {
-        width: 100%; display: flex; align-items: center; gap: 8px; padding: 9px 10px;
+        flex: 1; min-width: 0; display: flex; align-items: center; gap: 8px; padding: 9px 10px;
         background: #f8fafc; border: 1.5px solid #e2e8f0; border-radius: 11px;
         font-size: 12.5px; font-weight: 800; color: #1e293b;
       }
       .btl-opt-row:disabled { opacity: 0.45; }
-      .btl-opt-thumb { width: 32px; aspect-ratio: 63/88; object-fit: cover; border-radius: 4px; flex-shrink: 0; }
+      .btl-opt-thumb-btn {
+        padding: 0; border: 0; background: transparent; flex-shrink: 0; cursor: pointer;
+        border-radius: 5px; overflow: hidden; display: inline-flex;
+      }
+      .btl-opt-thumb { width: 34px; aspect-ratio: 63/88; object-fit: cover; border-radius: 4px; flex-shrink: 0; display: block; }
+      .btl-opt-zoom-btn {
+        width: 36px; height: 36px; flex-shrink: 0; border-radius: 10px;
+        background: #e0f2fe; border: 1.5px solid #38bdf8; color: #0369a1;
+        font-size: 15px; display: inline-flex; align-items: center; justify-content: center;
+      }
       .btl-spec-row { background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 12px; padding: 8px; }
     `;
     document.head.appendChild(style);
