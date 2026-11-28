@@ -1078,7 +1078,238 @@
       })), false);
     });
   }
-  async function performAttack(attackerKey, attackIdx) {
+  /* 自動処理済みのワザ効果かどうかを判定 */
+  function isAutoHandledAttackEffect(atk) {
+    if (!atk) return true;
+    if (atk.name === "バーニングダーク") return true;
+    if (typeof getAttackSwitchOpponentMode === "function" && getAttackSwitchOpponentMode(atk)) return true;
+    return false;
+  }
+
+  /* ワザ使用時に手動効果メニューを開くか判定 */
+  function needsManualAttackEffect(atk) {
+    if (!atk) return false;
+    if (atk.effectType === "manual") return true;
+    if (isAutoHandledAttackEffect(atk)) return false;
+    const txt = String(atk.effect || "").trim();
+    return txt.length > 0 && txt !== "なし" && txt !== "-";
+  }
+
+  /* 未対応ワザ用の手動効果メニュー（複数回連続で適用可能） */
+  async function openManualAttackEffectLoop(atk, sid) {
+    const pick = (title, sub, options) => new Promise((resolve) => {
+      openSelectModal(
+        title,
+        sub,
+        options.map((o) => ({ ...o, onPick: () => resolve(o.value) })),
+        true,
+        () => resolve(null)
+      );
+    });
+
+    while (isSessionAlive(sid) && G.phase === "play") {
+      const oppAct = G.ai.active;
+      const oppHpText = oppAct
+        ? `相手バトル場「${oppAct.card.name}」残りHP ${Math.max(0, getMaxHp(oppAct) - oppAct.damage)}/${getMaxHp(oppAct)}`
+        : "";
+      const subText = `${atk.effect ? `効果：${atk.effect}\n` : ""}${oppHpText}\n必要な効果を選んでください（複数可・終わったら完了）`;
+
+      const action = await pick(`✨ 「${atk.name}」の効果を手動適用`, subText, [
+        { label: "✅ 効果の処理を完了して次へ", value: "done" },
+        { label: "🪙 コイントスを投げる（表 / 裏）", value: "coin" },
+        { label: "💥 相手バトル場のダメージを増減（追加ダメ・軽減）", value: "opp_dmg", disabled: !oppAct },
+        { label: "🎯 相手のベンチポケモンにダメージ", value: "bench_dmg", disabled: G.ai.bench.length === 0 },
+        { label: "⚡ 相手バトル場を特殊状態にする", value: "opp_status", disabled: !oppAct },
+        { label: "🃏 自分の山札からカードを引く（1〜3枚）", value: "draw", disabled: G.player.deck.length === 0 },
+        { label: "🔍 自分の山札から1枚選んで手札に加える", value: "search_deck", disabled: G.player.deck.length === 0 },
+        { label: "💚 自分バトル場のHPを回復", value: "heal_self", disabled: !G.player.active || G.player.active.damage <= 0 },
+        { label: "🔋 自分バトル場のエネルギーをトラッシュ", value: "discard_ene", disabled: !G.player.active || G.player.active.energies.length === 0 },
+        { label: "🔄 自分のバトル場とベンチを入れ替える", value: "switch_self", disabled: G.player.bench.length === 0 },
+        { label: "🌪️ 相手のバトル場とベンチを入れ替える", value: "switch_opp", disabled: G.ai.bench.length === 0 },
+        { label: "💥 自分バトル場に反動ダメージ", value: "recoil", disabled: !G.player.active }
+      ]);
+
+      if (!action || action === "done") break;
+
+      if (action === "coin") {
+        const isHeads = await playUtilityCoinFlip(`${atk.name} コイン判定`);
+        addLog(`🪙 ワザ効果コイン：${isHeads ? "✨ 表（オモテ）！" : "🔮 裏（ウラ）！"}`, "important");
+        renderBattleArena();
+      } else if (action === "opp_dmg" && G.ai.active) {
+        const delta = await pick("💥 相手バトル場のダメージ調整", "追加または軽減するダメージ量を選択", [
+          { label: "+10 ダメージ", value: 10 },
+          { label: "+20 ダメージ", value: 20 },
+          { label: "+30 ダメージ", value: 30 },
+          { label: "+50 ダメージ", value: 50 },
+          { label: "+60 ダメージ", value: 60 },
+          { label: "+80 ダメージ", value: 80 },
+          { label: "+100 ダメージ", value: 100 },
+          { label: "-20 ダメージ軽減", value: -20 },
+          { label: "-30 ダメージ軽減", value: -30 }
+        ]);
+        if (delta !== null) {
+          G.ai.active.damage = Math.max(0, G.ai.active.damage + delta);
+          addLog(`💥 ワザ効果：相手の${G.ai.active.card.name}に${delta > 0 ? `+${delta}追加ダメージ` : `${Math.abs(delta)}ダメージ軽減`}！`, "attack");
+          renderBattleArena();
+          if (delta > 0) await playDamageHitEffect("ai", delta, "", sid);
+        }
+      } else if (action === "bench_dmg" && G.ai.bench.length > 0) {
+        const bIdx = await pick("🎯 相手のベンチを選択", "ダメージを与える相手のベンチポケモンを選択", G.ai.bench.map((sl, i) => ({
+          label: `${sl.card.name}（HP ${getMaxHp(sl) - sl.damage}/${getMaxHp(sl)}）`,
+          photoUrl: sl.card.photoUrl,
+          card: sl.card,
+          value: i
+        })));
+        if (bIdx !== null && G.ai.bench[bIdx]) {
+          const d = await pick("💥 ベンチへのダメージ量", `${G.ai.bench[bIdx].card.name}に与えるダメージを選択`, [10, 20, 30, 50, 60, 80, 100, 120].map((v) => ({
+            label: `${v} ダメージ`,
+            value: v
+          })));
+          if (d !== null) {
+            const sl = G.ai.bench[bIdx];
+            sl.damage += d;
+            addLog(`🎯 ワザ効果：相手ベンチの${sl.card.name}に${d}ダメージ！`, "attack");
+            if (sl.damage >= getMaxHp(sl)) {
+              const prizeTake = Number(sl.card.prizeCount) || 1;
+              G.ai.bench.splice(bIdx, 1);
+              G.ai.discard.push(...sl.stack, ...sl.energies);
+              if (sl.tool) G.ai.discard.push(sl.tool);
+              let taken = 0;
+              for (let i = 0; i < prizeTake && G.player.prizes.length > 0; i++) {
+                G.player.hand.push(G.player.prizes.shift());
+                taken++;
+              }
+              addLog(`💀 相手ベンチの${sl.card.name}がきぜつ！サイドを${taken}枚取った！`, "ko");
+              renderBattleArena();
+              if (G.player.prizes.length === 0) {
+                endMatch("player", "あなたがサイドをすべて取り切った！");
+                return;
+              }
+            } else {
+              renderBattleArena();
+              flashBoardTarget(`[data-ai-bench="${bIdx}"] .btl-pkm-card`);
+            }
+          }
+        }
+      } else if (action === "opp_status" && G.ai.active) {
+        const sl = G.ai.active;
+        if (!sl.status) clearSlotStatus(sl);
+        const st = await pick(`⚡ 相手「${sl.card.name}」の特殊状態`, "与える特殊状態を選んでください", [
+          { label: "☠️ どくにする", value: "poison" },
+          { label: "🔥 やけどにする", value: "burn" },
+          { label: "💤 ねむりにする", value: "asleep" },
+          { label: "⚡ マヒにする", value: "paralyzed" },
+          { label: "💫 こんらんにする", value: "confused" },
+          { label: "✨ 特殊状態を全回復", value: "clear" }
+        ]);
+        if (st) {
+          if (st === "poison") sl.status.poison = true;
+          else if (st === "burn") sl.status.burn = true;
+          else if (st === "clear") clearSlotStatus(sl);
+          else sl.status.special = st;
+          const label = st === "clear" ? "全回復" : STATUS_BADGE_META[st].label;
+          addLog(`⚡ ワザ効果：相手の${sl.card.name}を「${label}」にした！`, "info");
+          renderBattleArena();
+        }
+      } else if (action === "draw") {
+        const cnt = await pick("🃏 山札から引く枚数", "引く枚数を選んでください", [1, 2, 3].map((n) => ({ label: `${n}枚引く`, value: n })));
+        if (cnt) {
+          const drawn = drawCards(G.player, cnt);
+          addLog(`🃏 ワザ効果：山札から${drawn.length}枚引いた（${drawn.map((c) => c.name).join("・")}）`, "info");
+          renderBattleArena();
+        }
+      } else if (action === "search_deck") {
+        const uMap = new Map();
+        G.player.deck.forEach((c) => { if (!uMap.has(c.name)) uMap.set(c.name, c); });
+        const pickedName = await pick("🔍 山札から1枚選択", "手札に加えるカードを選択（自動でシャッフルされます）", [...uMap.values()].map((c) => ({
+          label: c.name,
+          photoUrl: c.photoUrl,
+          card: c,
+          value: c.name
+        })));
+        if (pickedName) {
+          const real = G.player.deck.find((x) => x.name === pickedName);
+          if (real) {
+            G.player.deck = G.player.deck.filter((x) => x.uid !== real.uid);
+            G.player.hand.push(real);
+            shuffle(G.player.deck);
+            addLog(`🔍 ワザ効果：山札から「${real.name}」を手札に加えた！`, "info");
+            renderBattleArena();
+          }
+        }
+      } else if (action === "heal_self" && G.player.active) {
+        const amt = await pick("💚 自分バトル場のHP回復", "回復量を選択", [
+          { label: "30 回復", value: 30 },
+          { label: "50 回復", value: 50 },
+          { label: "100 回復", value: 100 },
+          { label: "全回復", value: 9999 }
+        ]);
+        if (amt) {
+          G.player.active.damage = Math.max(0, G.player.active.damage - amt);
+          addLog(`💚 ワザ効果：${G.player.active.card.name}のHPを回復した！`, "info");
+          renderBattleArena();
+        }
+      } else if (action === "discard_ene" && G.player.active) {
+        const sl = G.player.active;
+        const eneOpts = sl.energies.map((e, i) => ({
+          label: `🔋 ${e.name} を1個トラッシュ`,
+          photoUrl: e.photoUrl,
+          value: i
+        }));
+        eneOpts.push({ label: "🗑️ ついているエネルギーをすべてトラッシュ", value: "all" });
+        const picked = await pick("🔋 エネルギーをトラッシュ", `${sl.card.name}から外すエネルギーを選択`, eneOpts);
+        if (picked === "all") {
+          const n = sl.energies.length;
+          G.player.discard.push(...sl.energies);
+          sl.energies = [];
+          addLog(`🔋 ワザ効果：${sl.card.name}のエネルギーをすべて(${n}個)トラッシュした。`, "info");
+          renderBattleArena();
+        } else if (typeof picked === "number" && sl.energies[picked]) {
+          const [removed] = sl.energies.splice(picked, 1);
+          G.player.discard.push(removed);
+          addLog(`🔋 ワザ効果：${sl.card.name}の${removed.name}をトラッシュした。`, "info");
+          renderBattleArena();
+        }
+      } else if (action === "switch_self" && G.player.bench.length > 0) {
+        const bIdx = await pick("🔄 自分のベンチと入れ替え", "バトル場に出すベンチポケモンを選択", G.player.bench.map((sl, i) => ({
+          label: `${sl.card.name}（HP ${getMaxHp(sl) - sl.damage}/${getMaxHp(sl)}・エネ${sl.energies.length}）`,
+          photoUrl: sl.card.photoUrl,
+          card: sl.card,
+          value: i
+        })));
+        if (bIdx !== null && G.player.bench[bIdx]) {
+          const nextAct = G.player.bench.splice(bIdx, 1)[0];
+          if (G.player.active) { clearSlotStatus(G.player.active); G.player.bench.push(G.player.active); }
+          G.player.active = nextAct;
+          addLog(`🔄 ワザ効果：ベンチの${nextAct.card.name}と入れ替えた！`, "info");
+          renderBattleArena();
+        }
+      } else if (action === "switch_opp" && G.ai.bench.length > 0) {
+        const bIdx = await pick("🌪️ 相手のベンチを呼び出す", "バトル場に出す相手のベンチポケモンを選択", G.ai.bench.map((sl, i) => ({
+          label: `${sl.card.name}（HP ${getMaxHp(sl) - sl.damage}/${getMaxHp(sl)}・エネ${sl.energies.length}）`,
+          photoUrl: sl.card.photoUrl,
+          card: sl.card,
+          value: i
+        })));
+        if (bIdx !== null && G.ai.bench[bIdx]) {
+          const nextAct = G.ai.bench.splice(bIdx, 1)[0];
+          if (G.ai.active) { clearSlotStatus(G.ai.active); G.ai.bench.push(G.ai.active); }
+          G.ai.active = nextAct;
+          addLog(`🌪️ ワザ効果：相手の${nextAct.card.name}をバトル場に呼び出した！`, "trainer");
+          renderBattleArena();
+        }
+      } else if (action === "recoil" && G.player.active) {
+        const rec = await pick("💥 自分への反動ダメージ", "受けるダメージを選択", [10, 20, 30, 50].map((v) => ({ label: `${v} ダメージ`, value: v })));
+        if (rec) {
+          G.player.active.damage += rec;
+          addLog(`💥 ワザ効果：${G.player.active.card.name}も反動で${rec}ダメージ！`, "attack");
+          renderBattleArena();
+          await playDamageHitEffect("player", rec, "", sid);
+        }
+      }
+    }
+  }
+  async function performAttack(attackerKey, attackIdx, forceManualEffect = false) {
     if (!G || G.phase !== "play") return;
     const sid = matchSessionId;
     if (G.turn === 1 && attackerKey === G.firstSide) {
@@ -1154,8 +1385,13 @@
       if (!isSessionAlive(sid)) return;
     }
 
-    const maxHp = getMaxHp(defSide.active);
-    if (defSide.active.damage >= maxHp) {
+    if (attackerKey === "player" && (forceManualEffect || needsManualAttackEffect(atk))) {
+      await openManualAttackEffectLoop(atk, sid);
+      if (!isSessionAlive(sid) || G.phase === "over") return;
+    }
+
+    const maxHp = defSide.active ? getMaxHp(defSide.active) : 0;
+    if (defSide.active && defSide.active.damage >= maxHp) {
       const koSlot = defSide.active;
       const prizeTake = Number(koSlot.card.prizeCount) || 1;
       defSide.discard.push(...koSlot.stack, ...koSlot.energies);
@@ -2542,7 +2778,7 @@ function openSelectZoom(items, idx) {
     openFieldZoom(slot, "player");
   }
 
-  function openAttackPicker() {
+  function openAttackPicker(forceManual = false) {
     if (!G || G.phase !== "play" || G.activeSide !== "player" || aiBusy) return;
     if (!G.player.active) return;
     if (G.turn === 1 && G.firstSide === "player") return toast("先攻1ターン目はワザを使えません");
@@ -2550,6 +2786,30 @@ function openSelectZoom(items, idx) {
       const stName = G.player.active.status.special === "asleep" ? "ねむり" : "マヒ";
       return toast(`${stName}状態のためワザを使えません（🛠️手動メニューから解除できます）`);
     }
+
+    const sl = G.player.active;
+    const atks = sl.card.attacks || [];
+    if (atks.length === 0) return toast("このポケモンにワザが登録されていません");
+
+    const opts = atks.map((a, idx) => {
+      const ok = sl.energies.length >= a.cost;
+      const isManual = forceManual || needsManualAttackEffect(a);
+      return {
+        label: `${ok ? "✅" : "🔒"} ${a.name}（必要エネ${a.cost} ／ ${a.damage}ダメ）${isManual ? "【🛠️効果手動】" : ""}${a.effect ? ` — ${a.effect}` : ""}`,
+        disabled: !ok,
+        onPick: () => performAttack("player", idx, forceManual)
+      };
+    });
+
+    opts.push({
+      label: forceManual
+        ? "🛠️ 効果を手動で選ぶモード：ON（タップでOFF）"
+        : "🛠️ 効果を手動で選ぶモード：OFF（未登録ワザはタップでON）",
+      onPick: () => openAttackPicker(!forceManual)
+    });
+
+    openSelectModal(`⚔️ ${sl.card.name}のワザ`, `ついているエネルギー：${sl.energies.length}個`, opts, true);
+  }
 
     const sl = G.player.active;
     const atks = sl.card.attacks || [];
