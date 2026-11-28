@@ -1205,7 +1205,11 @@
       }
       return;
     }
-
+const swMode = getAttackSwitchOpponentMode(atk);
+    if (swMode && defSide.active && defSide.bench.length > 0) {
+      await applyAttackSwitchOpponent(attackerKey, defKey, atk, swMode, sid);
+      if (!isSessionAlive(sid)) return;
+    }
     await endTurn();
   }
 
