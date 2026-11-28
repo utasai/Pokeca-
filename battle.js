@@ -57,6 +57,7 @@
     heal30: "きずぐすり（自分のポケモンのHPを30回復）",
    tool_hp30: "どうぐ：つけたポケモンの最大HP+30",
     tool_dmg20: "どうぐ：つけたポケモンのワザのダメージ+20",
+    tool_retreat2: "どうぐ：にげるエネ-2（ふうせん等）",
     stadium_search_basic: "スタジアム：番に1回、たね1枚ベンチへ（ボウルタウン等）",
     stadium_draw1: "スタジアム：番に1回、山札を1枚引く",
     stadium_heal30: "スタジアム：番に1回、バトル場HPを30回復",
@@ -434,6 +435,7 @@ let drawSkipResolver = null;
       return "none";
     }
     if (category === "tool") {
+      if (n.includes("ふうせん")) return "tool_retreat2";
       if (n.includes("おまもり") || n.includes("マント")) return "tool_hp30";
       if (n.includes("ベルト") || n.includes("ハチマキ") || n.includes("バンド")) return "tool_dmg20";
       return "tool_hp30";
@@ -676,6 +678,15 @@ let drawSkipResolver = null;
     const bonus = (slot.tool && slot.tool.trainerEffect === "tool_hp30") ? 30 : 0;
     const stBonus = (G && G.stadium && G.stadium.trainerEffect === "stadium_hp30") ? 30 : 0;
     return base + bonus + stBonus;
+  }
+ function getRetreatCost(slot) {
+    if (!slot || !slot.card) return 0;
+    let cost = Number(slot.card.retreat ?? 1);
+    if (G && G.stadium && G.stadium.trainerEffect === "stadium_retreat_minus1") cost -= 1;
+    if (slot.tool && (slot.tool.trainerEffect === "tool_retreat2" || String(slot.tool.name || "").includes("ふうせん"))) {
+      cost -= 2;
+    }
+    return Math.max(0, cost);
   }
   function canEvolveOnto(evoCard, targetSlot, currentTurn) {
     if (!evoCard || evoCard.category !== "pokemon" || !targetSlot) return false;
@@ -2957,6 +2968,9 @@ function openSelectZoom(items, idx) {
         : "";
       infoHtml += stHtml;
       infoHtml += `<div style="color:#cbd5e1;margin-bottom:4px;">${esc(card.stage || "たね")}・${ti.icon}${esc(card.type || "無色")} ／ 残りHP <b>${remHp}/${maxHp}</b>${slot.damage > 0 ? `（-${slot.damage}）` : ""}</div>`;
+      const baseRet = Number(card.retreat ?? 1);
+      const curRet = getRetreatCost(slot);
+      const retDisp = curRet < baseRet ? `<b style="color:#38bdf8;">${curRet}</b>（元${baseRet}）` : `${curRet}`;
       infoHtml += `<div style="color:#cbd5e1;margin-bottom:4px;">弱点:${esc(card.weakness || "なし")} ／ にげる:${card.retreat ?? 1} ／ サイド:${card.prizeCount || 1}枚</div>`;
       infoHtml += `<div style="color:#e2e8f0;margin-bottom:4px;">🔋 エネ: ${eneText}${slot.tool ? ` ／ 🛠️ ${esc(slot.tool.name)}` : ""}</div>`;
       const atks = card.attacks || [];
@@ -3290,10 +3304,8 @@ function openSelectZoom(items, idx) {
     }
 
     const activeSlot = G.player.active;
-    const stRetreat = (G.stadium && G.stadium.trainerEffect === "stadium_retreat_minus1") ? 1 : 0;
-    const cost = Math.max(0, (Number(activeSlot.card.retreat) || 0) - stRetreat);
+    const cost = getRetreatCost(activeSlot);
     if (activeSlot.energies.length < cost) return toast(`にげるエネルギーが足りません（必要 ${cost}個）`);
-
     const executeRetreat = (benchIndex, chosenEnergyUids) => {
       chosenEnergyUids.forEach((uid) => {
         const eIdx = activeSlot.energies.findIndex((e) => e.uid === uid);
