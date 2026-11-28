@@ -2593,6 +2593,42 @@ function useStadiumEffect(sideKey) {
     renderBattleArena();
     openManualAssistMenu();
   }
+  /* 拡大表示中のカードから盤面スロットを特定 */
+  function findBoardSlotByCard(card) {
+    if (!G || !card) return null;
+    const allSlots = [
+      G.player.active, ...G.player.bench,
+      G.ai.active, ...G.ai.bench
+    ].filter(Boolean);
+    return allSlots.find((sl) => sl.card && (sl.card.uid === card.uid || sl.card === card)) || null;
+  }
+
+  /* どうぐ（グッズ）の効果テキストをまとめて取得 */
+  function getToolEffectSummary(tool) {
+    if (!tool) return "";
+    const parts = [];
+    if (tool.trainerEffect && tool.trainerEffect !== "none" && TRAINER_EFFECT_LABELS[tool.trainerEffect]) {
+      parts.push(TRAINER_EFFECT_LABELS[tool.trainerEffect].replace(/^どうぐ：/, ""));
+    }
+    if (tool.effectText && String(tool.effectText).trim()) {
+      const txt = String(tool.effectText).trim();
+      if (!parts.includes(txt)) parts.push(txt);
+    }
+    return parts.length > 0 ? parts.join(" ／ ") : "効果テキスト未登録（🔍拡大で画像を確認）";
+  }
+
+  /* ついているどうぐ自体を拡大表示 */
+  function openToolZoom(tool) {
+    if (!tool) return;
+    zoomState = {
+      mode: "tool",
+      idx: 0,
+      owner: "tool",
+      list: [tool]
+    };
+    renderCardZoom();
+    document.getElementById("btlHandZoomOverlay").classList.add("is-open");
+  }
   function openStadiumZoom() {
     if (!G || !G.stadium) return;
     zoomState = {
@@ -2655,6 +2691,11 @@ function openSelectZoom(items, idx) {
       card = G.stadium;
       if (!card) { closeCardZoom(); return; }
       document.getElementById("btlHzPos").textContent = "🏟️ 場に出ているスタジアム";
+    } else if (zoomState.mode === "tool") {
+      totalLen = 1;
+      card = zoomState.list[0];
+      if (!card) { closeCardZoom(); return; }
+      document.getElementById("btlHzPos").textContent = "🛠️ ついているどうぐ（グッズ）";
     } else if (zoomState.mode === "select") {
       totalLen = zoomState.list.length;
       if (totalLen === 0) { closeCardZoom(); return; }
@@ -2800,6 +2841,42 @@ function openSelectZoom(items, idx) {
     } else {
       actionsEl.innerHTML = `<button id="btlHzCloseBtn" class="btl-act-btn" type="button" style="flex:1;">閉じる</button>`;
       document.getElementById("btlHzCloseBtn").onclick = closeCardZoom;
+    }
+    let toolBox = document.getElementById("btlHzToolBox");
+    if (!toolBox && actionsEl && actionsEl.parentNode) {
+      toolBox = document.createElement("div");
+      toolBox.id = "btlHzToolBox";
+      toolBox.className = "btl-hz-tool-box";
+      actionsEl.parentNode.insertBefore(toolBox, actionsEl);
+    }
+    if (toolBox) {
+      const boardSlot = (zoomState.mode !== "hand" && zoomState.mode !== "stadium" && zoomState.mode !== "select" && zoomState.mode !== "tool")
+        ? findBoardSlotByCard(card)
+        : null;
+      if (boardSlot && boardSlot.tool) {
+        const tl = boardSlot.tool;
+        toolBox.style.display = "flex";
+        toolBox.innerHTML = `
+          ${tl.photoUrl ? `<img src="${tl.photoUrl}" class="btl-hz-tool-thumb" alt="" />` : `<div class="btl-hz-tool-icon">🛠️</div>`}
+          <div class="btl-hz-tool-info">
+            <div class="btl-hz-tool-name">🛠️ ${esc(tl.name)}</div>
+            <div class="btl-hz-tool-eff">${esc(getToolEffectSummary(tl))}</div>
+          </div>
+          <button type="button" id="btlHzOpenToolBtn" class="btl-hz-tool-btn">🔍 拡大</button>
+        `;
+        document.getElementById("btlHzOpenToolBtn").onclick = () => openToolZoom(tl);
+      } else if (zoomState.mode === "tool" && card) {
+        toolBox.style.display = "flex";
+        toolBox.innerHTML = `
+          <div class="btl-hz-tool-info">
+            <div class="btl-hz-tool-name">🛠️ ${esc(card.name)} の効果</div>
+            <div class="btl-hz-tool-eff">${esc(getToolEffectSummary(card))}</div>
+          </div>
+        `;
+      } else {
+        toolBox.style.display = "none";
+        toolBox.innerHTML = "";
+      }
     }
   }
 
@@ -3998,6 +4075,28 @@ function openSelectZoom(items, idx) {
       @keyframes btlHandArrive {
         0% { transform: translateY(-12px) scale(1.1); box-shadow: 0 0 14px #facc15; }
         100% { transform: translateY(0) scale(1); }
+      }
+      .btl-hz-tool-box {
+        width: 100%; max-width: 340px; margin: 8px auto 0; padding: 8px 10px;
+        background: rgba(15, 23, 42, 0.92); border: 1.5px solid #38bdf8; border-radius: 12px;
+        display: none; align-items: center; gap: 8px; color: #f8fafc;
+      }
+      .btl-hz-tool-thumb {
+        width: 34px; aspect-ratio: 63 / 88; object-fit: cover; border-radius: 5px; flex-shrink: 0;
+      }
+      .btl-hz-tool-icon {
+        width: 34px; height: 46px; border-radius: 5px; background: #1e293b;
+        display: inline-flex; align-items: center; justify-content: center; font-size: 18px; flex-shrink: 0;
+      }
+      .btl-hz-tool-info { flex: 1; min-width: 0; text-align: left; }
+      .btl-hz-tool-name { font-size: 12px; font-weight: 900; color: #7dd3fc; line-height: 1.3; }
+      .btl-hz-tool-eff {
+        font-size: 11px; font-weight: 700; color: #e2e8f0; line-height: 1.35;
+        margin-top: 2px; word-break: break-word;
+      }
+      .btl-hz-tool-btn {
+        padding: 6px 10px; border-radius: 9px; border: 1.5px solid #38bdf8;
+        background: #0369a1; color: #fff; font-size: 11px; font-weight: 800; flex-shrink: 0;
       }
       .btl-cutin-overlay {
         position: fixed; inset: 0; z-index: 230;
