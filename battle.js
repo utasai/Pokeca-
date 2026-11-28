@@ -1754,8 +1754,9 @@ const swMode = getAttackSwitchOpponentMode(atk);
         }
         return { ok: true, summary: "" };
       }
+　　}
 
-      if (eff === "super_rod") {
+    if (eff === "super_rod") {
       const cands = side.discard.filter((c) => c.category === "pokemon" || c.category === "energy");
       if (cands.length === 0) { if (sideKey === "player") toast("トラッシュに戻せるポケモン・エネルギーがありません"); return false; }
 
