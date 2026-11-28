@@ -733,7 +733,7 @@ let drawSkipResolver = null;
     });
   }
   
-  async function processDrawShowcaseQueue() {
+ async function processDrawShowcaseQueue() {
     if (drawShowcaseRunning) return;
     drawShowcaseRunning = true;
     const ov = document.getElementById("btlDrawOverlay");
@@ -746,20 +746,9 @@ let drawSkipResolver = null;
         const item = drawShowcaseQueue.shift();
         if (!isSessionAlive(item.sid) || !ov || !stage) {
           item.cards.forEach((c) => c && pendingHandUids.delete(c.uid));
-          if (item.onDone) item.onDone(); // ★追加①
+          if (item.onDone) item.onDone();
           continue;
         }
-        // ...（中略：既存の表示・待機処理）...
-        if (!isSessionAlive(item.sid)) {
-          ov.classList.remove("is-open", "is-to-hand");
-          item.cards.forEach((c) => c && pendingHandUids.delete(c.uid));
-          if (item.onDone) item.onDone(); // ★追加②
-          break;
-        }
-        // ...（中略：既存の手札移動・renderBattleArena処理）...
-        await wait(120);
-        if (item.onDone) item.onDone(); // ★追加③
-      }
 
         const isMulti = item.cards.length > 1;
         badgeEl.textContent = item.badgeText;
@@ -795,6 +784,7 @@ let drawSkipResolver = null;
         if (!isSessionAlive(item.sid)) {
           ov.classList.remove("is-open", "is-to-hand");
           item.cards.forEach((c) => c && pendingHandUids.delete(c.uid));
+          if (item.onDone) item.onDone();
           break;
         }
 
@@ -819,6 +809,7 @@ let drawSkipResolver = null;
           }, 650);
         }
         await wait(120);
+        if (item.onDone) item.onDone();
       }
     } finally {
       drawShowcaseRunning = false;
