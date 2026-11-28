@@ -159,7 +159,12 @@
   let zoomState = { mode: "hand", idx: 0, owner: "player", list: [] };
   let cutinSkipResolver = null;
   let coinSkipResolver = null;
-
+let drawSkipResolver = null;
+  const pendingHandUids = new Set();
+  const justDrawnUids = new Set();
+  let drawShowcaseQueue = [];
+  let drawShowcaseRunning = false;
+  
   function esc(s) {
     return String(s || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
   }
@@ -706,6 +711,96 @@
     return basicCard.type === stage2Card.type;
   }
 
+  /* 引いたカードを中央に大きく表示してから手札へ送る演出（回転なし） */
+  function enqueuePlayerHandShowcase(cards, badgeText = "🃏 ドロー！") {
+    if (!G || !Array.isArray(cards) || cards.length === 0) return;
+    cards.forEach((c) => {
+      if (c && c.uid) pendingHandUids.add(c.uid);
+    });
+    drawShowcaseQueue.push({ cards: [...cards], badgeText, sid: matchSessionId });
+    if (!drawShowcaseRunning) processDrawShowcaseQueue();
+  }
+
+  async function processDrawShowcaseQueue() {
+    if (drawShowcaseRunning) return;
+    drawShowcaseRunning = true;
+    const ov = document.getElementById("btlDrawOverlay");
+    const stage = document.getElementById("btlDrawStage");
+    const badgeEl = document.getElementById("btlDrawBadge");
+    const nameEl = document.getElementById("btlDrawName");
+
+    try {
+      while (drawShowcaseQueue.length > 0) {
+        const item = drawShowcaseQueue.shift();
+        if (!isSessionAlive(item.sid) || !ov || !stage) {
+          item.cards.forEach((c) => c && pendingHandUids.delete(c.uid));
+          continue;
+        }
+
+        const isMulti = item.cards.length > 1;
+        badgeEl.textContent = item.badgeText;
+        nameEl.textContent = isMulti
+          ? `${item.cards.length}枚を手札に加えます`
+          : item.cards[0].name;
+
+        stage.className = `btl-draw-stage${isMulti ? " is-multi" : ""}`;
+        stage.innerHTML = item.cards.map((card) => {
+          const ti = getCardTypeInfo(card);
+          return `
+            <div class="btl-draw-card" style="border-color:${ti.color};">
+              ${card.photoUrl
+                ? `<img src="${card.photoUrl}" alt="${esc(card.name)}" />`
+                : `<div class="btl-draw-fb" style="background:${ti.bg};">
+                     <div style="font-size:${isMulti ? "9px" : "13px"};font-weight:900;color:#0f172a;">${esc(card.name)}</div>
+                     <div style="font-size:${isMulti ? "24px" : "44px"};margin:auto 0;">${ti.icon}</div>
+                     <div style="font-size:${isMulti ? "8px" : "11px"};font-weight:800;color:#475569;">${card.category === "pokemon" ? `HP ${card.hp}` : esc(card.category)}</div>
+                   </div>`}
+            </div>
+          `;
+        }).join("");
+
+        ov.classList.remove("is-to-hand");
+        ov.classList.add("is-open");
+
+        const holdMs = pace(isMulti ? 1250 : 900);
+        await new Promise((resolve) => {
+          const t = setTimeout(() => { drawSkipResolver = null; resolve(); }, holdMs);
+          drawSkipResolver = () => { clearTimeout(t); drawSkipResolver = null; resolve(); };
+        });
+
+        if (!isSessionAlive(item.sid)) {
+          ov.classList.remove("is-open", "is-to-hand");
+          item.cards.forEach((c) => c && pendingHandUids.delete(c.uid));
+          break;
+        }
+
+        ov.classList.add("is-to-hand");
+        await wait(360);
+        ov.classList.remove("is-open", "is-to-hand");
+
+        item.cards.forEach((c) => {
+          if (!c || !c.uid) return;
+          pendingHandUids.delete(c.uid);
+          justDrawnUids.add(c.uid);
+        });
+
+        if (isSessionAlive(item.sid)) {
+          renderBattleArena();
+          const handEl = document.getElementById("btlHandStrip");
+          if (handEl) handEl.scrollLeft = handEl.scrollWidth;
+          setTimeout(() => {
+            item.cards.forEach((c) => c && justDrawnUids.delete(c.uid));
+            const strip = document.getElementById("btlHandStrip");
+            if (strip) strip.querySelectorAll(".is-just-drawn").forEach((el) => el.classList.remove("is-just-drawn"));
+          }, 650);
+        }
+        await wait(120);
+      }
+    } finally {
+      drawShowcaseRunning = false;
+    }
+  }
+
   function drawCards(side, count) {
     const drawn = [];
     for (let i = 0; i < count; i++) {
@@ -713,6 +808,9 @@
       const c = side.deck.shift();
       side.hand.push(c);
       drawn.push(c);
+    }
+    if (G && G.phase === "play" && G.activeSide === "player" && side === G.player && drawn.length > 0) {
+      enqueuePlayerHandShowcase(drawn, drawn.length > 1 ? `🃏 ${drawn.length}枚ドロー！` : "🃏 ドロー！");
     }
     return drawn;
   }
@@ -3095,11 +3193,13 @@ function openSelectZoom(items, idx) {
 
     const handEl = document.getElementById("btlHandStrip");
     handEl.innerHTML = G.player.hand.map((c, idx) => {
+      if (pendingHandUids.has(c.uid)) return "";
       const ti = getCardTypeInfo(c);
       const isSel = G.selectedHandUid === c.uid;
+      const isJustDrawn = justDrawnUids.has(c.uid);
       const isSetupBasic = G.phase === "setup" && c.category === "pokemon" && (c.stage || "たね") === "たね";
       return `
-        <div class="btl-hand-card${isSel ? " is-selected" : ""}${isSetupBasic ? " is-setup-glow" : ""}" data-hidx="${idx}" data-uid="${c.uid}" style="border-color:${ti.color};">
+        <div class="btl-hand-card${isSel ? " is-selected" : ""}${isSetupBasic ? " is-setup-glow" : ""}${isJustDrawn ? " is-just-drawn" : ""}" data-hidx="${idx}" data-uid="${c.uid}" style="border-color:${ti.color};">
           ${c.photoUrl
             ? `<img src="${c.photoUrl}" alt="${esc(c.name)}" />`
             : `<div class="btl-hand-fb" style="background:${ti.bg};">
@@ -3803,7 +3903,64 @@ function openSelectZoom(items, idx) {
         0% { opacity: 0; transform: scaleY(0.4) translateX(-40px); }
         100% { opacity: 1; transform: scaleY(1) translateX(0); }
       }
-
+.btl-draw-overlay {
+        position: fixed; inset: 0; bottom: var(--host-bottom-offset, 0px); z-index: 242;
+        background: rgba(9, 15, 30, 0.52);
+        display: none; flex-direction: column; align-items: center; justify-content: center;
+        padding: 16px; transition: background 0.32s ease;
+      }
+      .btl-draw-overlay.is-open { display: flex; }
+      .btl-draw-badge {
+        background: rgba(15, 23, 42, 0.92); color: #fef08a; border: 1.5px solid #facc15;
+        border-radius: 9999px; padding: 4px 14px; font-size: 12px; font-weight: 900;
+        margin-bottom: 12px; transition: opacity 0.2s ease;
+      }
+      .btl-draw-stage {
+        display: flex; align-items: center; justify-content: center; flex-wrap: wrap;
+        gap: 8px; max-width: 360px;
+        animation: btlDrawPopIn 0.24s cubic-bezier(0.22, 1, 0.36, 1) forwards;
+      }
+      .btl-draw-card {
+        width: min(56vw, 215px); aspect-ratio: 63 / 88; border-radius: 13px;
+        border: 3px solid #facc15; overflow: hidden; background: #0f172a;
+        box-shadow: 0 18px 40px rgba(0,0,0,0.7);
+      }
+      .btl-draw-stage.is-multi .btl-draw-card {
+        width: min(24vw, 88px); border-radius: 8px; border-width: 2px;
+      }
+      .btl-draw-card img { width: 100%; height: 100%; object-fit: cover; display: block; }
+      .btl-draw-fb {
+        width: 100%; height: 100%; padding: 8px;
+        display: flex; flex-direction: column; text-align: center;
+      }
+      .btl-draw-name {
+        margin-top: 10px; font-size: 14px; font-weight: 900; color: #fff;
+        text-shadow: 0 2px 8px rgba(0,0,0,0.85); transition: opacity 0.2s ease;
+      }
+      .btl-draw-hint {
+        margin-top: 4px; font-size: 10px; font-weight: 700; color: rgba(255,255,255,0.62);
+        transition: opacity 0.2s ease;
+      }
+      .btl-draw-overlay.is-to-hand { background: transparent; pointer-events: none; }
+      .btl-draw-overlay.is-to-hand .btl-draw-badge,
+      .btl-draw-overlay.is-to-hand .btl-draw-name,
+      .btl-draw-overlay.is-to-hand .btl-draw-hint { opacity: 0; }
+      .btl-draw-overlay.is-to-hand .btl-draw-stage {
+        animation: btlDrawToHand 0.34s cubic-bezier(0.4, 0, 0.2, 1) forwards;
+      }
+      @keyframes btlDrawPopIn {
+        0% { opacity: 0; transform: translateY(-18px) scale(0.72); }
+        100% { opacity: 1; transform: translateY(0) scale(1); }
+      }
+      @keyframes btlDrawToHand {
+        0% { opacity: 1; transform: translateY(0) scale(1); }
+        100% { opacity: 0; transform: translateY(36vh) scale(0.26); }
+      }
+      .btl-hand-card.is-just-drawn { animation: btlHandArrive 0.55s ease; }
+      @keyframes btlHandArrive {
+        0% { transform: translateY(-12px) scale(1.1); box-shadow: 0 0 14px #facc15; }
+        100% { transform: translateY(0) scale(1); }
+      }
       .btl-cutin-overlay {
         position: fixed; inset: 0; z-index: 230;
         display: none; align-items: center; justify-content: center; padding: 20px;
@@ -3997,7 +4154,14 @@ function openSelectZoom(items, idx) {
           <div id="btlTurnBannerSub" class="btl-turn-band-sub">あなたの番</div>
         </div>
       </div>
-
+      
+<div id="btlDrawOverlay" class="btl-draw-overlay">
+        <div id="btlDrawBadge" class="btl-draw-badge">🃏 ドロー！</div>
+        <div id="btlDrawStage" class="btl-draw-stage"></div>
+        <div id="btlDrawName" class="btl-draw-name"></div>
+        <div class="btl-draw-hint">タップで手札へ</div>
+      </div>
+      
       <div id="btlCutinOverlay" class="btl-cutin-overlay">
         <div id="btlCutinCard" class="btl-cutin-box"></div>
       </div>
@@ -4046,8 +4210,16 @@ function openSelectZoom(items, idx) {
     document.getElementById("btlCutinOverlay").addEventListener("click", () => {
       if (cutinSkipResolver) cutinSkipResolver();
     });
+    document.getElementById("btlDrawOverlay").addEventListener("click", () => {
+      if (drawSkipResolver) drawSkipResolver();
+    });
     document.getElementById("btlCoinOverlay").addEventListener("click", () => {
       if (coinSkipResolver) coinSkipResolver();
+      if (drawSkipResolver) drawSkipResolver();
+      drawShowcaseQueue = [];
+      pendingHandUids.clear();
+      justDrawnUids.clear();
+      document.getElementById("btlDrawOverlay").classList.remove("is-open", "is-to-hand");
     });
 
     document.getElementById("btlCloseTrashBtn").addEventListener("click", closeTrashModal);
