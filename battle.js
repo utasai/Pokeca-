@@ -721,6 +721,18 @@ let drawSkipResolver = null;
     if (!drawShowcaseRunning) processDrawShowcaseQueue();
   }
 
+/* 演出が終わるまで await で待てる版（サイド獲得などカットインと並べたい時用） */
+  function playPlayerHandShowcaseNow(cards, badgeText = "🃏 手札へ！") {
+    if (!G || !Array.isArray(cards) || cards.length === 0) return Promise.resolve();
+    return new Promise((resolve) => {
+      cards.forEach((c) => {
+        if (c && c.uid) pendingHandUids.add(c.uid);
+      });
+      drawShowcaseQueue.push({ cards: [...cards], badgeText, sid: matchSessionId, onDone: resolve });
+      if (!drawShowcaseRunning) processDrawShowcaseQueue();
+    });
+  }
+  
   async function processDrawShowcaseQueue() {
     if (drawShowcaseRunning) return;
     drawShowcaseRunning = true;
@@ -734,8 +746,20 @@ let drawSkipResolver = null;
         const item = drawShowcaseQueue.shift();
         if (!isSessionAlive(item.sid) || !ov || !stage) {
           item.cards.forEach((c) => c && pendingHandUids.delete(c.uid));
+          if (item.onDone) item.onDone(); // ★追加①
           continue;
         }
+        // ...（中略：既存の表示・待機処理）...
+        if (!isSessionAlive(item.sid)) {
+          ov.classList.remove("is-open", "is-to-hand");
+          item.cards.forEach((c) => c && pendingHandUids.delete(c.uid));
+          if (item.onDone) item.onDone(); // ★追加②
+          break;
+        }
+        // ...（中略：既存の手札移動・renderBattleArena処理）...
+        await wait(120);
+        if (item.onDone) item.onDone(); // ★追加③
+      }
 
         const isMulti = item.cards.length > 1;
         badgeEl.textContent = item.badgeText;
@@ -985,6 +1009,11 @@ let drawSkipResolver = null;
           addLog(`💀 ${side.name}の${sl.card.name}が特殊状態できぜつ！ ${opp.name}はサイドを${taken.length}枚取った！`, "ko");
           renderBattleArena();
 
+　　　　　if (opp === G.player && taken.length > 0) {
+            await playPlayerHandShowcaseNow(taken, `🎁 サイド獲得！（${taken.length}枚）`);
+            if (!isSessionAlive(sid)) return "over";
+          }
+          
           if (opp.prizes.length === 0) {
             endMatch(oppKey, `${opp.name}がサイドをすべて取り切った！`);
             return "over";
@@ -1272,18 +1301,17 @@ let drawSkipResolver = null;
               G.ai.bench.splice(bIdx, 1);
               G.ai.discard.push(...sl.stack, ...sl.energies);
               if (sl.tool) G.ai.discard.push(sl.tool);
-              let taken = 0;
+             const taken = [];
               for (let i = 0; i < prizeTake && G.player.prizes.length > 0; i++) {
-                G.player.hand.push(G.player.prizes.shift());
-                taken++;
+                const pr = G.player.prizes.shift();
+                G.player.hand.push(pr);
+                taken.push(pr);
               }
-              addLog(`💀 相手ベンチの${sl.card.name}がきぜつ！サイドを${taken}枚取った！`, "ko");
-              renderBattleArena();
-              if (G.player.prizes.length === 0) {
-                endMatch("player", "あなたがサイドをすべて取り切った！");
-                return;
+              addLog(`💀 相手ベンチの${sl.card.name}がきぜつ！サイドを${taken.length}枚取った！`, "ko");
+              if (taken.length > 0) {
+                await playPlayerHandShowcaseNow(taken, `🎁 サイド獲得！（${taken.length}枚）`);
+                if (!isSessionAlive(sid)) return;
               }
-            } else {
               renderBattleArena();
               flashBoardTarget(`[data-ai-bench="${bIdx}"] .btl-pkm-card`);
             }
@@ -1332,6 +1360,7 @@ let drawSkipResolver = null;
             G.player.hand.push(real);
             shuffle(G.player.deck);
             addLog(`🔍 ワザ効果：山札から「${real.name}」を手札に加えた！`, "info");
+            enqueuePlayerHandShowcase([real], "🔍 山札から手札へ！");
             renderBattleArena();
           }
         }
@@ -1500,6 +1529,7 @@ let drawSkipResolver = null;
       for (let i = 0; i < prizeTake && atkSide.prizes.length > 0; i++) {
         const pr = atkSide.prizes.shift();
         atkSide.hand.push(pr);
+        if (atkSide === G.player) pendingHandUids.add(pr.uid);
         taken.push(pr);
       }
       addLog(`💀 ${defSide.name}の${koSlot.card.name}がきぜつ！ ${atkSide.name}はサイドを${taken.length}枚取った！（残り${atkSide.prizes.length}枚）`, "ko");
@@ -1514,6 +1544,11 @@ let drawSkipResolver = null;
         duration: 1450
       }, sid);
       if (!isSessionAlive(sid)) return;
+
+      if (atkSide === G.player && taken.length > 0) {
+        await playPlayerHandShowcaseNow(taken, `🎁 サイド獲得！（${taken.length}枚）`);
+        if (!isSessionAlive(sid)) return;
+      }
 
       if (atkSide.prizes.length === 0) {
         endMatch(attackerKey, `${atkSide.name}がサイドをすべて取り切った！`);
@@ -1673,17 +1708,19 @@ const swMode = getAttackSwitchOpponentMode(atk);
         addLog(`🧑 AIが「${card.name}」で ${pickedNames.join("・")} を手札に加えた！`, "trainer");
         if (onDone) onDone();
         return { ok: true, summary: `山札から「${pickedNames.join("」「")}」を手札に加えた` };
-      } else {
+    } else {
         consumeCard();
         const gotNames = [];
+        const gotCards = [];
+        const finishArven = () => {
+          shuffle(side.deck);
+          addLog(`🧑 「${card.name}」で ${gotNames.length > 0 ? gotNames.join("・") : "なし"} を手札に加えた！`, "trainer");
+          if (gotCards.length > 0) enqueuePlayerHandShowcase(gotCards, "🔍 山札から手札へ！");
+          if (onDone) onDone();
+        };
         const stepTool = () => {
           const curTools = side.deck.filter((c) => c.category === "tool");
-          if (curTools.length === 0) {
-            shuffle(side.deck);
-            addLog(`🧑 「${card.name}」で ${gotNames.length > 0 ? gotNames.join("・") : "なし"} を手札に加えた。`, "trainer");
-            if (onDone) onDone();
-            return;
-          }
+          if (curTools.length === 0) { finishArven(); return; }
           const uMap = new Map();
           curTools.forEach((c) => { if (!uMap.has(c.name)) uMap.set(c.name, c); });
           openSelectModal(`${card.name}（2/2：ポケモンのどうぐ）`, "山札から手札に加えるどうぐを1枚選択（不要なら✕）", [...uMap.values()].map((c) => ({
@@ -1691,16 +1728,16 @@ const swMode = getAttackSwitchOpponentMode(atk);
             photoUrl: c.photoUrl,
             onPick: () => {
               const real = side.deck.find((x) => x.name === c.name && x.category === "tool");
-              if (real) { side.deck = side.deck.filter((x) => x.uid !== real.uid); side.hand.push(real); gotNames.push(real.name); }
-              shuffle(side.deck);
-              addLog(`🧑 「${card.name}」で ${gotNames.join("・")} を手札に加えた！`, "trainer");
-              if (onDone) onDone();
+              if (real) {
+                side.deck = side.deck.filter((x) => x.uid !== real.uid);
+                side.hand.push(real);
+                pendingHandUids.add(real.uid);
+                gotNames.push(real.name);
+                gotCards.push(real);
+              }
+              finishArven();
             }
-          })), true, () => {
-            shuffle(side.deck);
-            addLog(`🧑 「${card.name}」で ${gotNames.length > 0 ? gotNames.join("・") : "なし"} を手札に加えた。`, "trainer");
-            if (onDone) onDone();
-          });
+          })), true, finishArven);
         };
 
         if (goodsList.length > 0) {
@@ -1711,7 +1748,13 @@ const swMode = getAttackSwitchOpponentMode(atk);
             photoUrl: c.photoUrl,
             onPick: () => {
               const real = side.deck.find((x) => x.name === c.name && x.category === "goods");
-              if (real) { side.deck = side.deck.filter((x) => x.uid !== real.uid); side.hand.push(real); gotNames.push(real.name); }
+              if (real) {
+                side.deck = side.deck.filter((x) => x.uid !== real.uid);
+                side.hand.push(real);
+                pendingHandUids.add(real.uid);
+                gotNames.push(real.name);
+                gotCards.push(real);
+              }
               stepTool();
             }
           })), true, stepTool);
@@ -1720,9 +1763,8 @@ const swMode = getAttackSwitchOpponentMode(atk);
         }
         return { ok: true, summary: "" };
       }
-    }
 
-    if (eff === "super_rod") {
+      if (eff === "super_rod") {
       const cands = side.discard.filter((c) => c.category === "pokemon" || c.category === "energy");
       if (cands.length === 0) { if (sideKey === "player") toast("トラッシュに戻せるポケモン・エネルギーがありません"); return false; }
 
@@ -2037,6 +2079,7 @@ const swMode = getAttackSwitchOpponentMode(atk);
                 if (real) {
                   side.deck = side.deck.filter((x) => x.uid !== real.uid);
                   side.hand.push(real);
+                  enqueuePlayerHandShowcase([real], "🔍 山札から手札へ！");
                   addLog(`🎒 「${card.name}」で${real.name}を手札に加えた！`, "trainer");
                 }
                 shuffle(side.deck);
@@ -2072,6 +2115,7 @@ const swMode = getAttackSwitchOpponentMode(atk);
         take.forEach((e) => { side.deck = side.deck.filter((x) => x.uid !== e.uid); side.hand.push(e); });
         shuffle(side.deck);
         addLog(`🔋 ${side.name}が「${card.name}」でエネルギーを${take.length}枚手札に加えた！`, "trainer");
+        if (side === G.player && take.length > 0) enqueuePlayerHandShowcase(take, "🔋 山札から手札へ！");
         if (onDone) onDone();
         return take.length;
       };
@@ -2508,6 +2552,7 @@ function useStadiumEffect(sideKey) {
     }
 
     if (eff === "stadium_energy_hand") {
+      enqueuePlayerHandShowcase([real], "🏟️ スタジアムで手札へ！");
       const enes = side.deck.filter((c) => c.category === "energy");
       if (enes.length === 0) return toast("山札にエネルギーがありません");
       const uMap = new Map();
@@ -3032,6 +3077,7 @@ function openSelectZoom(items, idx) {
           onPick: () => {
             const real = G.player.deck.find((x) => x.name === c.name);
             if (real) { G.player.deck = G.player.deck.filter((x) => x.uid !== real.uid); G.player.hand.push(real); shuffle(G.player.deck); addLog(`🛠️ 手動サーチ：${real.name}`, "info"); renderBattleArena(); }
+         enqueuePlayerHandShowcase([real], "🔍 山札から手札へ！");
           }
         })), true);
       } }
