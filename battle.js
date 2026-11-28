@@ -1943,6 +1943,10 @@
         if (G.player.bench.length >= 5) return { label: "ベンチがいっぱいです", disabled: true };
         return { label: "🪑 ベンチに出す", disabled: false };
       }
+      if (G.turn <= 2) return { label: "お互いの最初の番は進化不可", disabled: true };
+      const allSlots = [G.player.active, ...G.player.bench].filter(Boolean);
+      const hasTarget = allSlots.some((sl) => canEvolveOnto(card, sl, G.turn));
+      if (!hasTarget) return { label: "進化できるポケモンがいません", disabled: true };
       return { label: "✨ 進化先を選ぶ", disabled: false };
     }
     if (card.category === "energy") {
@@ -1956,6 +1960,9 @@
       return { label: "🧑 このサポートを使う", disabled: false };
     }
     if (card.category === "stadium") return { label: "🏟️ スタジアムを出す", disabled: false };
+    if (card.trainerEffect === "rare_candy" && G.turn <= 2) {
+      return { label: "お互いの最初の番は使用不可", disabled: true };
+    }
     return { label: "🎒 このグッズを使う", disabled: false };
   }
 
@@ -2206,6 +2213,9 @@
       return;
     }
 
+   if (card.category === "pokemon" && (card.stage || "たね") !== "たね" && G.turn <= 2) {
+      return toast("お互いの最初のターンは進化できません");
+    }
     if (card.category === "energy" && G.energyAttachedThisTurn) {
       return toast("エネルギーは1ターンに1枚までです");
     }
