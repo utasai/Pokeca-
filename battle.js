@@ -2629,6 +2629,223 @@ function useStadiumEffect(sideKey) {
     renderCardZoom();
     document.getElementById("btlHandZoomOverlay").classList.add("is-open");
   }
+  /* 特性の自動効果一覧 */
+  const ABILITY_EFFECT_LABELS = {
+    none: "特性効果：手動で反映（手動メニューを開く）",
+    draw1: "番に1回：山札を1枚引く",
+    draw2: "番に1回：山札を2枚引く（とりひき等）",
+    draw_to_5: "番に1回：手札が5枚になるまで引く（はたらくまえば等）",
+    search_any: "番に1回：山札から好きなカード1枚を手札へ（マッハサーチ等）",
+    search_basic_bench: "番に1回：山札からたねポケモン1枚をベンチへ",
+    attach_ene_deck: "番に1回：山札からエネ1枚を自分のポケモンにつける",
+    attach_ene_discard: "番に1回：トラッシュからエネ1枚を自分のポケモンにつける",
+    heal30: "番に1回：自分のポケモン1匹のHPを30回復",
+    dmg_opp20: "番に1回：相手のポケモン1匹にダメカンを2個（20ダメ）のせる"
+  };
+
+  /* 盤面の自分のポケモンの特性を使う（1匹につき1ターン1回・進化すると再使用可） */
+  function usePokemonAbility(slot) {
+    if (!G || !slot || !slot.card || G.phase !== "play" || G.activeSide !== "player" || aiBusy) return;
+    const card = slot.card;
+    const abName = String(card.abilityName || "").trim();
+    if (!abName) return;
+
+    const usedKey = `${G.turn}:${card.uid}`;
+    if (slot.abilityUsedKey === usedKey) {
+      toast(`「${abName}」はこの番すでに使用済みです`);
+      return;
+    }
+
+    const eff = card.abilityType || "none";
+    const side = G.player;
+    const markUsed = () => { slot.abilityUsedKey = usedKey; };
+    const showHandAnim = (cards, badge) => {
+      if (typeof enqueuePlayerHandShowcase === "function" && cards.length > 0) {
+        enqueuePlayerHandShowcase(cards, badge);
+      }
+    };
+
+    if (eff === "draw1" || eff === "draw2") {
+      if (side.deck.length === 0) return toast("山札が0枚です");
+      const cnt = eff === "draw2" ? 2 : 1;
+      const drawn = drawCards(side, cnt);
+      markUsed();
+      addLog(`✨ ${card.name}の特性「${abName}」で${drawn.length}枚ドロー！`, "trainer");
+      renderBattleArena();
+      return;
+    }
+
+    if (eff === "draw_to_5") {
+      const need = 5 - side.hand.length;
+      if (need <= 0) return toast("手札がすでに5枚以上あります");
+      if (side.deck.length === 0) return toast("山札が0枚です");
+      const drawn = drawCards(side, need);
+      markUsed();
+      addLog(`✨ ${card.name}の特性「${abName}」で${drawn.length}枚ドロー！`, "trainer");
+      renderBattleArena();
+      return;
+    }
+
+    if (eff === "search_any") {
+      if (side.deck.length === 0) return toast("山札が0枚です");
+      const uMap = new Map();
+      side.deck.forEach((c) => { if (!uMap.has(c.name)) uMap.set(c.name, c); });
+      openSelectModal(`✨ 特性「${abName}」`, "山札から手札に加えるカードを1枚選んでください", [...uMap.values()].map((c) => ({
+        label: c.name,
+        photoUrl: c.photoUrl,
+        card: c,
+        onPick: () => {
+          const real = side.deck.find((x) => x.name === c.name);
+          if (real) {
+            side.deck = side.deck.filter((x) => x.uid !== real.uid);
+            side.hand.push(real);
+            shuffle(side.deck);
+            markUsed();
+            addLog(`✨ ${card.name}の特性「${abName}」で「${real.name}」を手札に加えた！`, "trainer");
+            showHandAnim([real], `✨ ${abName}`);
+            renderBattleArena();
+          }
+        }
+      })), true);
+      return;
+    }
+
+    if (eff === "search_basic_bench") {
+      if (side.bench.length >= 5) return toast("ベンチがいっぱいです（最大5匹）");
+      const cands = side.deck.filter((c) => c.category === "pokemon" && (c.stage || "たね") === "たね");
+      if (cands.length === 0) return toast("山札にたねポケモンがいません");
+      const uMap = new Map();
+      cands.forEach((c) => { if (!uMap.has(c.name)) uMap.set(c.name, c); });
+      openSelectModal(`✨ 特性「${abName}」`, "ベンチに出すたねポケモンを1枚選んでください", [...uMap.values()].map((c) => ({
+        label: `${c.name}（HP ${c.hp || 70}）`,
+        photoUrl: c.photoUrl,
+        card: c,
+        onPick: () => {
+          const real = side.deck.find((x) => x.name === c.name && x.category === "pokemon" && (x.stage || "たね") === "たね");
+          if (real) {
+            side.deck = side.deck.filter((x) => x.uid !== real.uid);
+            side.bench.push(createPokemonSlot(real, G.turn));
+            shuffle(side.deck);
+            markUsed();
+            addLog(`✨ ${card.name}の特性「${abName}」で${real.name}をベンチに出した！`, "trainer");
+            renderBattleArena();
+          }
+        }
+      })), true);
+      return;
+    }
+
+    if (eff === "attach_ene_deck" || eff === "attach_ene_discard") {
+      const fromDeck = eff === "attach_ene_deck";
+      const srcArr = fromDeck ? side.deck : side.discard;
+      const enes = srcArr.filter((c) => c.category === "energy");
+      if (enes.length === 0) return toast(`${fromDeck ? "山札" : "トラッシュ"}にエネルギーがありません`);
+      const targets = [side.active, ...side.bench].filter(Boolean);
+      const uMap = new Map();
+      enes.forEach((c) => { if (!uMap.has(c.name)) uMap.set(c.name, c); });
+      openSelectModal(`✨ 特性「${abName}」（1/2：エネ選択）`, `${fromDeck ? "山札" : "トラッシュ"}からつけるエネルギーを選択`, [...uMap.values()].map((e) => ({
+        label: e.name,
+        photoUrl: e.photoUrl,
+        card: e,
+        onPick: () => {
+          openSelectModal(`✨ 特性「${abName}」（2/2：つける先）`, `${e.name}をつける自分のポケモンを選択`, targets.map((sl) => ({
+            label: `${sl === side.active ? "【バトル場】" : "【ベンチ】"}${sl.card.name}（エネ${sl.energies.length}）`,
+            photoUrl: sl.card.photoUrl,
+            card: sl.card,
+            onPick: () => {
+              const real = srcArr.find((x) => x.name === e.name && x.category === "energy");
+              if (real) {
+                if (fromDeck) {
+                  side.deck = side.deck.filter((x) => x.uid !== real.uid);
+                  shuffle(side.deck);
+                } else {
+                  side.discard = side.discard.filter((x) => x.uid !== real.uid);
+                }
+                sl.energies.push(real);
+                markUsed();
+                addLog(`✨ ${card.name}の特性「${abName}」で${sl.card.name}に${real.name}をつけた！`, "trainer");
+                renderBattleArena();
+              }
+            }
+          })), true);
+        }
+      })), true);
+      return;
+    }
+
+    if (eff === "heal30") {
+      const hurt = [side.active, ...side.bench].filter((sl) => sl && sl.damage > 0);
+      if (hurt.length === 0) return toast("ダメージを受けている自分のポケモンがいません");
+      openSelectModal(`✨ 特性「${abName}」`, "HPを30回復するポケモンを選んでください", hurt.map((sl) => ({
+        label: `${sl === side.active ? "【バトル場】" : "【ベンチ】"}${sl.card.name}（HP ${getMaxHp(sl) - sl.damage}/${getMaxHp(sl)}）`,
+        photoUrl: sl.card.photoUrl,
+        card: sl.card,
+        onPick: () => {
+          sl.damage = Math.max(0, sl.damage - 30);
+          markUsed();
+          addLog(`✨ ${card.name}の特性「${abName}」で${sl.card.name}のHPを30回復！`, "trainer");
+          renderBattleArena();
+        }
+      })), true);
+      return;
+    }
+
+    if (eff === "dmg_opp20") {
+      const oppTargets = [G.ai.active, ...G.ai.bench].filter(Boolean);
+      if (oppTargets.length === 0) return toast("相手の場にポケモンがいません");
+      openSelectModal(`✨ 特性「${abName}」`, "ダメカンを2個（20ダメージ）のせる相手のポケモンを選択", oppTargets.map((sl) => ({
+        label: `${sl === G.ai.active ? "【相手バトル場】" : "【相手ベンチ】"}${sl.card.name}（HP ${getMaxHp(sl) - sl.damage}/${getMaxHp(sl)}）`,
+        photoUrl: sl.card.photoUrl,
+        card: sl.card,
+        onPick: () => {
+          sl.damage += 20;
+          markUsed();
+          addLog(`✨ ${card.name}の特性「${abName}」で相手の${sl.card.name}に20ダメージ！`, "attack");
+          if (sl.damage >= getMaxHp(sl)) {
+            const prizeTake = Number(sl.card.prizeCount) || 1;
+            const isOppAct = sl === G.ai.active;
+            if (isOppAct) {
+              G.ai.active = null;
+            } else {
+              G.ai.bench = G.ai.bench.filter((x) => x !== sl);
+            }
+            G.ai.discard.push(...sl.stack, ...sl.energies);
+            if (sl.tool) G.ai.discard.push(sl.tool);
+            const taken = [];
+            for (let i = 0; i < prizeTake && side.prizes.length > 0; i++) {
+              const pr = side.prizes.shift();
+              side.hand.push(pr);
+              taken.push(pr);
+            }
+            addLog(`💀 相手の${sl.card.name}がきぜつ！サイドを${taken.length}枚取った！`, "ko");
+            showHandAnim(taken, `🎁 サイド獲得！（${taken.length}枚）`);
+            if (side.prizes.length === 0) {
+              renderBattleArena();
+              endMatch("player", "あなたがサイドをすべて取り切った！");
+              return;
+            }
+            if (isOppAct) {
+              if (G.ai.bench.length === 0) {
+                renderBattleArena();
+                endMatch("player", "相手の場にポケモンがいなくなった！");
+                return;
+              }
+              G.ai.active = G.ai.bench.shift();
+              addLog(`相手は${G.ai.active.card.name}をバトル場に出した。`, "info");
+            }
+          }
+          renderBattleArena();
+        }
+      })), true);
+      return;
+    }
+
+    // 未対応の特殊特性は使用済みにして手動補助メニューを開く
+    markUsed();
+    addLog(`✨ ${card.name}の特性「${abName}」を使用（手動メニューで反映）`, "trainer");
+    renderBattleArena();
+    openManualAssistMenu();
+  }
   function openStadiumZoom() {
     if (!G || !G.stadium) return;
     zoomState = {
@@ -2876,6 +3093,46 @@ function openSelectZoom(items, idx) {
       } else {
         toolBox.style.display = "none";
         toolBox.innerHTML = "";
+      }
+    }
+    let abBox = document.getElementById("btlHzAbilityBox");
+    if (!abBox && actionsEl && actionsEl.parentNode) {
+      abBox = document.createElement("div");
+      abBox.id = "btlHzAbilityBox";
+      abBox.className = "btl-hz-ab-box";
+      actionsEl.parentNode.insertBefore(abBox, actionsEl);
+    }
+    if (abBox) {
+      const abSlot = (zoomState.mode !== "hand" && zoomState.mode !== "stadium" && zoomState.mode !== "select" && zoomState.mode !== "tool")
+        ? findBoardSlotByCard(card)
+        : null;
+      const abName = card ? String(card.abilityName || "").trim() : "";
+      if (abSlot && abName) {
+        const isMine = G.player.active === abSlot || G.player.bench.includes(abSlot);
+        const usedKey = `${G.turn}:${card.uid}`;
+        const alreadyUsed = abSlot.abilityUsedKey === usedKey;
+        const canUseNow = isMine && G.phase === "play" && G.activeSide === "player" && !aiBusy && !alreadyUsed;
+        const abDesc = String(card.abilityText || "").trim()
+          || (card.abilityType && ABILITY_EFFECT_LABELS[card.abilityType])
+          || "特性テキスト未登録";
+
+        abBox.style.display = "flex";
+        abBox.innerHTML = `
+          <div class="btl-hz-ab-info">
+            <div class="btl-hz-ab-name">✨ 特性：${esc(abName)}</div>
+            <div class="btl-hz-ab-eff">${esc(abDesc)}</div>
+          </div>
+          ${isMine ? `<button type="button" id="btlHzUseAbBtn" class="btl-hz-ab-btn" ${canUseNow ? "" : "disabled"}>${alreadyUsed ? "使用済み" : "✨ 使う"}</button>` : ""}
+        `;
+        if (isMine) {
+          document.getElementById("btlHzUseAbBtn").onclick = () => {
+            closeCardZoom();
+            usePokemonAbility(abSlot);
+          };
+        }
+      } else {
+        abBox.style.display = "none";
+        abBox.innerHTML = "";
       }
     }
   }
@@ -3587,6 +3844,12 @@ function openSelectZoom(items, idx) {
           <option value="switch_opp_def" ${a1.effectType === "switch_opp_def" ? "selected" : ""}>ワザ2効果：相手バトル場とベンチ入替（相手が選ぶ）</option>
           <option value="switch_opp_atk" ${a1.effectType === "switch_opp_atk" ? "selected" : ""}>ワザ2効果：相手バトル場とベンチ入替（自分が選ぶ）</option>
         </select>
+        <div style="font-size:10px;font-weight:800;color:#7c3aed;margin:6px 0 2px;">✨ 特性（任意・空欄なら特性なし）</div>
+        <input type="text" class="form-control sp-ab-name" value="${esc(s.abilityName || "")}" placeholder="特性名（例：マッハサーチ / はたらくまえば）" style="padding:4px 6px;font-size:11px;margin-bottom:4px;" />
+        <select class="form-control sp-ab-type" style="padding:4px 6px;font-size:11px;margin-bottom:4px;">
+          ${Object.entries(ABILITY_EFFECT_LABELS).map(([k, v]) => `<option value="${k}" ${(s.abilityType || "none") === k ? "selected" : ""}>${esc(v)}</option>`).join("")}
+        </select>
+        <input type="text" class="form-control sp-ab-text" value="${esc(s.abilityText || "")}" placeholder="特性の説明メモ（任意）" style="padding:4px 6px;font-size:11px;" />
       `;
     }
     if (cat === "energy") {
@@ -3667,11 +3930,17 @@ function openSelectZoom(items, idx) {
           if (a1Name) {
             const a1Cost = row.querySelector(".sp-a1-cost") ? Math.max(0, Number(row.querySelector(".sp-a1-cost").value) || 0) : 2;
             const a1Dmg = row.querySelector(".sp-a1-dmg") ? Math.max(0, Number(row.querySelector(".sp-a1-dmg").value) || 0) : 0;
-            const a1EffType = row.querySelector(".sp-a1-efftype") ? row.querySelector(".sp-a1-efftype").value : "none";
+          const a1EffType = row.querySelector(".sp-a1-efftype") ? row.querySelector(".sp-a1-efftype").value : "none";
             const prevA1Eff = (it.spec.attacks && it.spec.attacks[1] && it.spec.attacks[1].effect) || "";
             attacks.push({ name: a1Name, cost: a1Cost, damage: a1Dmg, effect: prevA1Eff, effectType: a1EffType });
           }
+          const abilityName = row.querySelector(".sp-ab-name") ? row.querySelector(".sp-ab-name").value.trim() : "";
+          const abilityType = row.querySelector(".sp-ab-type") ? row.querySelector(".sp-ab-type").value : "none";
+          const abilityText = row.querySelector(".sp-ab-text") ? row.querySelector(".sp-ab-text").value.trim() : "";
           nextSpec.attacks = attacks;
+          nextSpec.abilityName = abilityName;
+          nextSpec.abilityType = abilityType;
+          nextSpec.abilityText = abilityText;
         } else if (cat === "energy") {
           if (row.querySelector(".sp-type")) nextSpec.type = row.querySelector(".sp-type").value;
         } else {
@@ -4098,7 +4367,23 @@ function openSelectZoom(items, idx) {
         padding: 6px 10px; border-radius: 9px; border: 1.5px solid #38bdf8;
         background: #0369a1; color: #fff; font-size: 11px; font-weight: 800; flex-shrink: 0;
       }
-      .btl-cutin-overlay {
+      .btl-hz-ab-box {
+        width: 100%; max-width: 340px; margin: 8px auto 0; padding: 8px 10px;
+        background: rgba(30, 15, 58, 0.92); border: 1.5px solid #a855f7; border-radius: 12px;
+        display: none; align-items: center; gap: 8px; color: #f8fafc;
+      }
+      .btl-hz-ab-info { flex: 1; min-width: 0; text-align: left; }
+      .btl-hz-ab-name { font-size: 12px; font-weight: 900; color: #d8b4fe; line-height: 1.3; }
+      .btl-hz-ab-eff {
+        font-size: 11px; font-weight: 700; color: #e2e8f0; line-height: 1.35;
+        margin-top: 2px; word-break: break-word;
+      }
+      .btl-hz-ab-btn {
+        padding: 7px 12px; border-radius: 9px; border: 1.5px solid #c084fc;
+        background: #7e22ce; color: #fff; font-size: 11.5px; font-weight: 900; flex-shrink: 0;
+      }
+      .btl-hz-ab-btn:disabled { opacity: 0.45; background: #475569; border-color: #64748b; }
+       .btl-cutin-overlay {
         position: fixed; inset: 0; z-index: 230;
         display: none; align-items: center; justify-content: center; padding: 20px;
         background: rgba(9, 15, 30, 0.42);
